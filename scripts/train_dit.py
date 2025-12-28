@@ -8,13 +8,12 @@ Example usage:
     # Multi-GPU with torchrun
     torchrun --nproc_per_node=8 scripts/train_dit.py --config configs/dit_imagenet.py
 
-    # With FSDP
+    # With FSDP2
     torchrun --nproc_per_node=8 scripts/train_dit.py --config configs/dit_imagenet.py --fsdp
 """
 
 import argparse
-import os
-import random
+import math
 import time
 from copy import deepcopy
 from contextlib import nullcontext
@@ -26,13 +25,15 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 from torch.distributed._composable.fsdp import fully_shard, MixedPrecisionPolicy
+from torch.nn.parallel import DistributedDataParallel as DDP
 
-from vitok import AEConfig, create_ae, load_ae
-from vitok import DiTConfig, create_dit, load_dit
+from vitok import AEConfig, load_ae
+from vitok import DiTConfig, create_dit
 from vitok import create_dataloader
 from vitok.diffusion import FlowUniPCMultistepScheduler
 from vitok.naflex_io import postprocess_images
 from vitok.utils.weights import load_weights
+from vitok import training_utils as tu
 
 
 @dataclass
@@ -70,6 +71,7 @@ class TrainConfig:
     log_freq: int = 100
     sample_freq: int = 5000
     save_freq: int = 10000
+    marked_freq: int = 50000
     output_dir: str = "checkpoints"
     wandb_project: Optional[str] = None
     wandb_name: Optional[str] = None
@@ -81,103 +83,16 @@ class TrainConfig:
     bf16: bool = True
 
 
-def setup_distributed():
-    """Initialize distributed training."""
-    if 'RANK' in os.environ:
-        dist.init_process_group(backend='nccl')
-        rank = dist.get_rank()
-        world_size = dist.get_world_size()
-        local_rank = int(os.environ.get('LOCAL_RANK', 0))
-        torch.cuda.set_device(local_rank)
-        device = torch.device(f'cuda:{local_rank}')
-    else:
-        rank = 0
-        world_size = 1
-        local_rank = 0
-        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-
-    return rank, world_size, local_rank, device
-
-
 def requires_grad(model: nn.Module, flag: bool = True):
     """Set requires_grad for all parameters."""
     for p in model.parameters():
         p.requires_grad = flag
 
 
-def update_ema(ema_model: nn.Module, model: nn.Module, decay: float):
-    """Update EMA model parameters."""
-    with torch.no_grad():
-        ema_params = dict(ema_model.named_parameters())
-        for name, param in model.named_parameters():
-            if name in ema_params:
-                ema_params[name].lerp_(param.data, 1 - decay)
-
-
-def get_cosine_schedule(
-    optimizer,
-    warmup_steps: int,
-    total_steps: int,
-    min_lr_ratio: float = 0.1,
-):
-    """Create cosine LR schedule with warmup."""
-    import math
-
-    def lr_lambda(step):
-        if step < warmup_steps:
-            return step / max(1, warmup_steps)
-        progress = (step - warmup_steps) / max(1, total_steps - warmup_steps)
-        return min_lr_ratio + 0.5 * (1 - min_lr_ratio) * (1 + math.cos(math.pi * progress))
-
-    return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
-
-
-def save_checkpoint(
-    model,
-    ema,
-    optimizer,
-    scheduler,
-    step: int,
-    output_dir: str,
-    rank: int,
-):
-    """Save training checkpoint."""
-    if rank != 0:
-        return
-
-    checkpoint_dir = Path(output_dir) / f"step_{step:07d}"
-    checkpoint_dir.mkdir(parents=True, exist_ok=True)
-
-    # Get state dict (handle FSDP/DDP)
-    if hasattr(model, 'module'):
-        model_state = model.module.state_dict()
-    else:
-        model_state = model.state_dict()
-
-    if hasattr(ema, 'module'):
-        ema_state = ema.module.state_dict()
-    else:
-        ema_state = ema.state_dict()
-
-    from safetensors.torch import save_file
-
-    save_file(model_state, checkpoint_dir / "model.safetensors")
-    save_file(ema_state, checkpoint_dir / "ema.safetensors")
-
-    # Save training state
-    torch.save({
-        'step': step,
-        'optimizer': optimizer.state_dict(),
-        'scheduler': scheduler.state_dict(),
-    }, checkpoint_dir / "train_state.pt")
-
-    print(f"Saved checkpoint to {checkpoint_dir}")
-
-
 def main():
     parser = argparse.ArgumentParser(description="Train DiT with flow matching")
     parser.add_argument("--config", type=str, help="Path to config file")
-    parser.add_argument("--fsdp", action="store_true", help="Use FSDP")
+    parser.add_argument("--fsdp", action="store_true", help="Use FSDP2")
     parser.add_argument("--compile", action="store_true", help="Use torch.compile")
     parser.add_argument("--output_dir", type=str, default="checkpoints")
     parser.add_argument("--ae_checkpoint", type=str, help="Path to AE checkpoint")
@@ -208,14 +123,9 @@ def main():
             setattr(config, k, v)
 
     # Setup distributed
-    rank, world_size, local_rank, device = setup_distributed()
-
-    # Set seed
-    torch.manual_seed(config.seed + rank)
-    random.seed(config.seed + rank)
-
-    # Dtype
-    dtype = torch.bfloat16 if config.bf16 and torch.cuda.is_available() else torch.float32
+    rank, world_size, local_rank, device, device_mesh = tu.setup_distributed(config.seed)
+    use_fsdp = config.fsdp and world_size > 1
+    dtype = torch.bfloat16 if config.bf16 else torch.float32
 
     def autocast_ctx():
         if config.bf16:
@@ -223,10 +133,7 @@ def main():
         return nullcontext()
 
     # Create AE (frozen encoder)
-    ae_config = AEConfig(
-        variant=config.ae_variant,
-        variational=True,
-    )
+    ae_config = AEConfig(variant=config.ae_variant, variational=True)
     ae = load_ae(config.ae_checkpoint, ae_config, device=device, dtype=dtype)
     ae.eval()
     requires_grad(ae, False)
@@ -253,7 +160,6 @@ def main():
     if config.dit_checkpoint:
         load_weights(dit, config.dit_checkpoint, strict=False)
         load_weights(ema, config.dit_checkpoint, strict=False)
-        # Try to load training state
         train_state_path = Path(config.dit_checkpoint).parent / "train_state.pt"
         if train_state_path.exists():
             state = torch.load(train_state_path, map_location='cpu')
@@ -272,15 +178,18 @@ def main():
         ema = torch.compile(ema, fullgraph=True)
         ae = torch.compile(ae, fullgraph=True)
 
-    # Wrap with FSDP or DDP
-    if config.fsdp and world_size > 1:
-        mp = MixedPrecisionPolicy(param_dtype=dtype, reduce_dtype=dtype)
-        fully_shard(dit, mp_policy=mp)
-        fully_shard(ema, mp_policy=MixedPrecisionPolicy(param_dtype=dtype))
-    elif world_size > 1:
-        dit = torch.nn.parallel.DistributedDataParallel(
-            dit, device_ids=[local_rank], find_unused_parameters=False
-        )
+    # Wrap with FSDP2 or DDP
+    if world_size > 1:
+        if use_fsdp:
+            mp = MixedPrecisionPolicy(param_dtype=dtype, reduce_dtype=dtype)
+            fully_shard(dit, mesh=device_mesh, mp_policy=mp)
+            fully_shard(ema, mesh=device_mesh, mp_policy=MixedPrecisionPolicy(param_dtype=dtype))
+            if rank == 0:
+                print("Using FSDP2")
+        else:
+            dit = DDP(dit, device_ids=[local_rank], find_unused_parameters=False)
+            if rank == 0:
+                print("Using DDP")
 
     # Optimizer
     optimizer = torch.optim.AdamW(
@@ -291,19 +200,19 @@ def main():
         fused=True,
     )
 
-    # Scheduler
-    warmup_steps = int(config.warmup_ratio * config.steps)
-    lr_scheduler = get_cosine_schedule(optimizer, warmup_steps, config.steps)
+    # Build train_state for DCP checkpointing
+    train_state = {
+        "app": tu.ModelOptimizerState(dit, optimizer),
+        "step": start_step,
+    }
 
-    # Restore optimizer state if resuming
+    # Restore optimizer state if resuming with DCP
     if config.dit_checkpoint:
-        train_state_path = Path(config.dit_checkpoint).parent / "train_state.pt"
-        if train_state_path.exists():
-            state = torch.load(train_state_path, map_location='cpu')
-            if 'optimizer' in state:
-                optimizer.load_state_dict(state['optimizer'])
-            if 'scheduler' in state:
-                lr_scheduler.load_state_dict(state['scheduler'])
+        try:
+            tu.load_checkpoint(train_state, config.dit_checkpoint, rank)
+            start_step = train_state.get('step', start_step)
+        except Exception:
+            pass  # Fall back to manual loading above
 
     # Scheduler for training and sampling (flow matching with velocity prediction)
     diffusion_scheduler = FlowUniPCMultistepScheduler(thresholding=False)
@@ -311,13 +220,12 @@ def main():
     eval_scheduler = FlowUniPCMultistepScheduler(thresholding=False)
 
     # Dataloader
-    # Build preprocessing string for patchified data
     pp_str = f"random_resized_crop({config.image_size})|flip|to_tensor|normalize(minus_one_to_one)|patchify({config.image_size}, 16, {config.max_tokens})"
 
     if config.hf_repo:
         source = f"hf://{config.hf_repo}/*.tar"
     elif config.data_paths:
-        source = config.data_paths[0] if len(config.data_paths) == 1 else config.data_paths[0]
+        source = config.data_paths[0]
     else:
         raise ValueError("Must provide either data_paths or hf_repo")
 
@@ -326,7 +234,7 @@ def main():
         pp=pp_str,
         batch_size=config.batch_size,
         num_workers=config.num_workers,
-        seed=config.seed,
+        seed=config.seed + start_step,
         return_labels=True,
     )
 
@@ -335,15 +243,18 @@ def main():
     # WandB
     if rank == 0 and config.wandb_project:
         import wandb
-        wandb.init(
-            project=config.wandb_project,
-            name=config.wandb_name,
-            config=vars(config),
-        )
+        wandb.init(project=config.wandb_project, name=config.wandb_name, config=vars(config))
+
+    # Output directory
+    output_dir = Path(config.output_dir)
+    if rank == 0:
+        output_dir.mkdir(parents=True, exist_ok=True)
 
     # Training loop
     dit.train()
     step = start_step
+    warmup_steps = int(config.warmup_ratio * config.steps)
+    grad_params = [p for p in dit.parameters() if p.requires_grad]
 
     if rank == 0:
         print(f"Starting training from step {step}")
@@ -365,6 +276,15 @@ def main():
             for k, v in patch_dict.items()
         }
         labels = labels.to(device)
+
+        # Learning rate schedule
+        if step < warmup_steps:
+            lr = config.lr * step / max(1, warmup_steps)
+        else:
+            progress = (step - warmup_steps) / max(1, config.steps - warmup_steps)
+            lr = config.lr * 0.1 + config.lr * 0.9 * 0.5 * (1 + math.cos(math.pi * progress))
+        for pg in optimizer.param_groups:
+            pg['lr'] = lr
 
         # Encode with frozen AE
         with torch.no_grad():
@@ -404,21 +324,17 @@ def main():
         loss.backward()
 
         # Gradient clipping
-        if config.grad_clip > 0:
-            grad_norm = torch.nn.utils.clip_grad_norm_(dit.parameters(), config.grad_clip)
-        else:
-            grad_norm = 0.0
+        grad_norm = tu.clip_grad_norm_(grad_params, config.grad_clip, use_fsdp=use_fsdp, world_size=world_size)
 
         optimizer.step()
-        lr_scheduler.step()
-
         step += 1
+        train_state['step'] = step
 
         # EMA update
         if step < config.ema_start_step:
-            update_ema(ema, dit, decay=0.0)  # Copy weights
+            tu.update_ema(ema, dit, decay=0.0)  # Copy weights
         else:
-            update_ema(ema, dit, decay=config.ema_decay)
+            tu.update_ema(ema, dit, decay=config.ema_decay)
 
         # Logging
         if step % config.log_freq == 0:
@@ -427,7 +343,6 @@ def main():
             samples_per_sec = config.batch_size / step_time
 
             if rank == 0:
-                lr = optimizer.param_groups[0]['lr']
                 print(
                     f"Step {step}/{config.steps} | "
                     f"Loss: {loss.item():.4f} | "
@@ -441,30 +356,35 @@ def main():
                     wandb.log({
                         "loss": loss.item(),
                         "lr": lr,
-                        "grad_norm": grad_norm,
+                        "grad_norm": float(grad_norm),
                         "samples_per_sec": samples_per_sec,
                         "step": step,
                     })
 
         # Save checkpoint
         if step % config.save_freq == 0:
-            save_checkpoint(dit, ema, optimizer, lr_scheduler, step, config.output_dir, rank)
+            tu.save_checkpoint(train_state, str(output_dir), step, rank, world_size)
+            if rank == 0:
+                print(f"Saved checkpoint at step {step}")
+
+        # Marked checkpoint
+        if config.marked_freq > 0 and step % config.marked_freq == 0:
+            tu.save_marked_checkpoint(train_state, str(output_dir), step, rank)
+            if rank == 0:
+                print(f"Saved marked checkpoint at step {step}")
 
         # Sample visualization
         if step % config.sample_freq == 0 and rank == 0:
             dit.eval()
             with torch.no_grad():
-                # Generate samples
                 sample_labels = torch.arange(min(16, config.num_classes), device=device)
                 sample_labels_null = torch.full_like(sample_labels, config.num_classes)
                 latents = torch.randn(len(sample_labels), z.shape[1], z.shape[2], device=device)
 
-                # Sampling with UniPC
                 eval_scheduler.set_timesteps(50)
-                for i, t in enumerate(eval_scheduler.timesteps):
+                for t in eval_scheduler.timesteps:
                     t_batch = t.expand(latents.shape[0])
 
-                    # CFG
                     x_in = torch.cat([latents, latents], dim=0)
                     t_in = torch.cat([t_batch, t_batch], dim=0)
                     y_in = torch.cat([sample_labels_null, sample_labels], dim=0)
@@ -474,11 +394,9 @@ def main():
 
                     uncond, cond = out.chunk(2, dim=0)
                     v_pred = uncond + 4.0 * (cond - uncond)
-
                     latents = eval_scheduler.step(v_pred.float(), t, latents, return_dict=False)[0]
 
                 # Decode with AE
-                # Create minimal patch dict for decoding
                 L = latents.shape[1]
                 side = int(L ** 0.5)
                 y, x = torch.meshgrid(
@@ -516,7 +434,7 @@ def main():
             dit.train()
 
     # Final checkpoint
-    save_checkpoint(dit, ema, optimizer, lr_scheduler, step, config.output_dir, rank)
+    tu.save_checkpoint(train_state, str(output_dir), step, rank, world_size)
 
     if rank == 0:
         print("Training complete!")
@@ -524,7 +442,7 @@ def main():
             import wandb
             wandb.finish()
 
-    if world_size > 1:
+    if dist.is_initialized():
         dist.destroy_process_group()
 
 
