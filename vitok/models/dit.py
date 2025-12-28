@@ -3,14 +3,13 @@
 import torch
 import torch.nn as nn
 import math
-from typing import Optional, Tuple
-from torch.utils.checkpoint import checkpoint as _checkpoint
+from typing import Optional, Tuple, Dict
 
 from vitok.models.modules.attention import Attention, create_2d_block_mask
 from vitok.models.modules.norm import LayerNorm
 from vitok.models.modules.mlp import SwiGLU
 from vitok.models.modules.layerscale import LayerScale
-from vitok.models.modules.rotary_embedding import compute_2d_freqs_cis, compute_inv_freq
+from vitok.models.modules.rotary_embedding import compute_2d_freqs_cis
 
 try:
     from torchao.float8 import convert_to_float8_training
@@ -123,12 +122,12 @@ class DiT(nn.Module):
         class_token: bool = False,
         reg_tokens: int = 0,
         train_seq_len: Optional[int] = None,
+        rope_theta: float = 10000.0,
         **kwargs,
     ):
         super().__init__()
 
         # Hardcoded hyperparameters
-        rope_theta = 10000.0
         mlp_ratio = 2.67
         mod_tanh = 3.0
         sw_every = 2
@@ -151,7 +150,6 @@ class DiT(nn.Module):
         self.train_seq_len = train_seq_len
         self.freq_dim = freq_dim
 
-        self._inv_freq_cache: dict = {}
         self._block_mask = None
 
         self.input_proj = nn.Linear(code_width, width, bias=False)
@@ -209,69 +207,52 @@ class DiT(nn.Module):
             )
 
     def _should_checkpoint(self, layer_idx: int) -> bool:
-        if self.checkpoint == 0 or not self.training:
-            return False
-        return layer_idx % self.checkpoint == 0
+        return self.checkpoint > 0 and self.training and (layer_idx % self.checkpoint == 0)
 
-    def _get_axis_inv_freq(self, axis_dim: int, device: torch.device) -> torch.Tensor:
-        key = (str(device), axis_dim)
-        cached = self._inv_freq_cache.get(key)
-        if cached is None:
-            cached = compute_inv_freq(axis_dim, self.rope_theta, device=device)
-            self._inv_freq_cache[key] = cached
-        return cached
-
-    def _prepare_2d_positions(
+    def _get_rope_freqs(
         self,
-        source: dict,
+        dit_dict: Dict[str, torch.Tensor],
+        head_dim: int,
+        device: torch.device,
         batch_size: int,
-        device: torch.device,
-    ) -> torch.Tensor:
-        yidx = source['yidx']
-        xidx = source['xidx']
-        if yidx.ndim == 1:
-            yidx = yidx.unsqueeze(0)
-        if xidx.ndim == 1:
-            xidx = xidx.unsqueeze(0)
-        if yidx.shape[0] == 1 and batch_size > 1:
-            yidx = yidx.expand(batch_size, -1)
-        if xidx.shape[0] == 1 and batch_size > 1:
-            xidx = xidx.expand(batch_size, -1)
-        return torch.stack(
-            (yidx.to(device=device, dtype=torch.float32),
-             xidx.to(device=device, dtype=torch.float32)),
-            dim=-1,
-        )
-
-    def _make_square_positions(self, batch_size: int, length: int, device: torch.device) -> torch.Tensor:
-        side = int(round(length ** 0.5))
-        if side * side != length:
-            raise ValueError(f"Cannot infer 2D positions: length {length} is not a perfect square")
-        y, x = torch.meshgrid(
-            torch.arange(side, device=device),
-            torch.arange(side, device=device),
-            indexing='ij',
-        )
-        pos = torch.stack((y.flatten().float(), x.flatten().float()), dim=-1)
-        return pos.unsqueeze(0).expand(batch_size, -1, -1).contiguous()
-
-    def _compute_rope_freqs(
-        self,
-        positions_2d: torch.Tensor,
-        device: torch.device,
+        seq_len: int,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        head_dim = self.width // self.num_heads
-        axis_inv_freq = self._get_axis_inv_freq(head_dim // 2, device)
-        freqs_cos, freqs_sin = compute_2d_freqs_cis(
-            positions_2d[..., 0],
-            positions_2d[..., 1],
-            dim=head_dim,
-            theta=self.rope_theta,
-            axis_inv_freq=axis_inv_freq,
-        )
+        """Compute 2D RoPE frequencies from positions or infer from sequence length."""
+        if 'yidx' in dit_dict and 'xidx' in dit_dict:
+            yidx = dit_dict['yidx'].to(device=device, dtype=torch.float32)
+            xidx = dit_dict['xidx'].to(device=device, dtype=torch.float32)
+            # Handle unbatched positions
+            if yidx.ndim == 1:
+                yidx = yidx.unsqueeze(0).expand(batch_size, -1)
+            if xidx.ndim == 1:
+                xidx = xidx.unsqueeze(0).expand(batch_size, -1)
+        else:
+            # Infer square grid positions
+            side = int(round(seq_len ** 0.5))
+            if side * side != seq_len:
+                raise ValueError(f"Cannot infer 2D positions: length {seq_len} is not a perfect square")
+            y, x = torch.meshgrid(
+                torch.arange(side, device=device, dtype=torch.float32),
+                torch.arange(side, device=device, dtype=torch.float32),
+                indexing='ij',
+            )
+            yidx = y.flatten().unsqueeze(0).expand(batch_size, -1)
+            xidx = x.flatten().unsqueeze(0).expand(batch_size, -1)
+
+        freqs_cos, freqs_sin = compute_2d_freqs_cis(yidx, xidx, head_dim, self.rope_theta)
+
+        # Prepend identity frequencies for special tokens
+        S = self.num_special_tokens
+        if S > 0:
+            rope_dim = freqs_cos.shape[-1]
+            ones = torch.ones(batch_size, S, rope_dim, device=device, dtype=freqs_cos.dtype)
+            zeros = torch.zeros_like(ones)
+            freqs_cos = torch.cat([ones, freqs_cos], dim=1)
+            freqs_sin = torch.cat([zeros, freqs_sin], dim=1)
+
         return freqs_cos.float(), freqs_sin.float()
 
-    def forward(self, dit_dict: dict) -> torch.Tensor:
+    def forward(self, dit_dict: Dict[str, torch.Tensor]) -> torch.Tensor:
         """
         Forward pass.
 
@@ -280,7 +261,7 @@ class DiT(nn.Module):
                 - z: [B, L, code_width] latent tokens
                 - t: [B] timesteps (0 to num_train_timesteps)
                 - context: [B] class labels
-                - yidx, xidx: [B, L] spatial positions (optional)
+                - yidx, xidx: [B, L] or [L] spatial positions (optional, inferred if square)
                 - attention_mask: [B, L, L] attention mask (optional)
 
         Returns:
@@ -295,6 +276,7 @@ class DiT(nn.Module):
 
         x = self.input_proj(z)
 
+        # Prepend special tokens
         if self.cls_token is not None or self.reg_token is not None:
             tokens = []
             if self.cls_token is not None:
@@ -304,11 +286,11 @@ class DiT(nn.Module):
             tokens.append(x)
             x = torch.cat(tokens, dim=1)
 
-        if 'yidx' in dit_dict and 'xidx' in dit_dict:
-            positions_2d = self._prepare_2d_positions(dit_dict, B, device)
-        else:
-            positions_2d = self._make_square_positions(B, L, device)
+        # Compute RoPE frequencies
+        head_dim = self.width // self.num_heads
+        freqs_cis = self._get_rope_freqs(dit_dict, head_dim, device, B, L)
 
+        # Timestep and class embeddings
         t_emb = timestep_embedding(t, self.freq_dim, dtype=torch.float32, device=device)
         t_emb = self.time_embedder(t_emb.to(x.dtype))
 
@@ -316,6 +298,7 @@ class DiT(nn.Module):
         if class_emb.ndim == 3:
             class_emb = class_emb.squeeze(1)
 
+        # Modulation
         vec = t_emb + class_emb
         mod_params = self.mod_proj(vec).view(B, NUM_MOD_PARAMS, self.width)
         head_mod = self.head_mod_proj(vec).view(B, 2, self.width)
@@ -324,26 +307,18 @@ class DiT(nn.Module):
             head_scale = torch.tanh(head_scale) * self.mod_tanh
             head_mod = torch.stack((head_shift, head_scale), dim=1)
 
-        freqs_cos, freqs_sin = self._compute_rope_freqs(positions_2d, device)
-        if self.num_special_tokens > 0:
-            S = self.num_special_tokens
-            head_dim = freqs_cos.shape[-1]
-            ones = torch.ones(B, S, head_dim, device=device, dtype=freqs_cos.dtype)
-            zeros = torch.zeros_like(ones)
-            freqs_cos = torch.cat([ones, freqs_cos], dim=1)
-            freqs_sin = torch.cat([zeros, freqs_sin], dim=1)
-        freqs_cis = (freqs_cos, freqs_sin)
-
         attn_mask = dit_dict.get('attention_mask', None)
 
+        # Transformer blocks
         for layer_idx, block in enumerate(self.blocks):
             if self._should_checkpoint(layer_idx):
                 def run_block(_x):
                     return block(_x, mod_params, freqs_cis, attn_mask, self._block_mask)
-                x = _checkpoint(run_block, x, use_reentrant=False)
+                x = torch.utils.checkpoint.checkpoint(run_block, x, use_reentrant=False)
             else:
                 x = block(x, mod_params, freqs_cis, attn_mask, self._block_mask)
 
+        # Remove special tokens
         if self.num_special_tokens > 0:
             x = x[:, self.num_special_tokens:]
 
