@@ -9,7 +9,7 @@ import torch
 
 from vitok.configs.variant_parser import decode_dit_variant
 from vitok.models.dit import DiT as _DiT
-from vitok.utils.weights import load_weights
+from vitok.utils import load_weights, resolve_dtype
 
 
 @dataclass(frozen=True)
@@ -93,25 +93,11 @@ def load_dit(
         DiT model instance (in eval mode if checkpoint loaded)
     """
     model = create_dit(config, **overrides)
-    model.to(device=device, dtype=_resolve_dtype(dtype))
+    model.to(device=device, dtype=resolve_dtype(dtype))
     if checkpoint:
         load_weights(model, checkpoint, strict=strict)
     model.eval()
     return model
-
-
-def _resolve_dtype(dtype: str | torch.dtype) -> torch.dtype:
-    """Convert dtype string to torch.dtype."""
-    if isinstance(dtype, torch.dtype):
-        return dtype
-    name = str(dtype).lower()
-    if name in ("bf16", "bfloat16"):
-        return torch.bfloat16
-    if name in ("fp16", "float16", "half"):
-        return torch.float16
-    if name in ("fp32", "float32", "float"):
-        return torch.float32
-    raise ValueError(f"Unsupported dtype: {dtype}")
 
 
 # Re-export for convenience

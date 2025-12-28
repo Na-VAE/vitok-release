@@ -29,9 +29,9 @@ from torch.distributed._composable.fsdp import fully_shard, MixedPrecisionPolicy
 
 from vitok import AEConfig, create_ae, load_ae
 from vitok import DiTConfig, create_dit, load_dit
-from vitok import StreamingWebDatasetConfig, create_streaming_dataloader
+from vitok import create_dataloader
 from vitok.diffusion import FlowUniPCMultistepScheduler
-from vitok.datasets.io import postprocess_images
+from vitok.naflex_io import postprocess_images
 from vitok.utils.weights import load_weights
 
 
@@ -311,41 +311,24 @@ def main():
     eval_scheduler = FlowUniPCMultistepScheduler(thresholding=False)
 
     # Dataloader
+    # Build preprocessing string for patchified data
+    pp_str = f"random_resized_crop({config.image_size})|flip|to_tensor|normalize(minus_one_to_one)|patchify({config.image_size}, 16, {config.max_tokens})"
+
     if config.hf_repo:
-        from vitok.datasets.webdataset import HFWebDataset
-        from vitok.transforms import TransformCfg, build_transform
-        from vitok.transforms.collate import patch_collate_fn
-
-        transform_cfg = TransformCfg(
-            train=True,
-            patch_size=16,
-            max_tokens=config.max_tokens,
-            max_size=config.image_size,
-        )
-        transform = build_transform(transform_cfg)
-
-        dataset = HFWebDataset(
-            hf_repo=config.hf_repo,
-            transform=transform,
-            collate_fn=patch_collate_fn,
-            batch_size=config.batch_size,
-            num_workers=config.num_workers,
-            seed=config.seed,
-            return_labels=True,
-        )
-        dataloader = dataset.create_dataloader()
+        source = f"hf://{config.hf_repo}/*.tar"
     elif config.data_paths:
-        data_config = StreamingWebDatasetConfig(
-            bucket_paths=config.data_paths,
-            batch_size=config.batch_size,
-            num_workers=config.num_workers,
-            max_tokens=config.max_tokens,
-            seed=config.seed,
-            return_labels=True,
-        )
-        dataloader = create_streaming_dataloader(data_config)
+        source = config.data_paths[0] if len(config.data_paths) == 1 else config.data_paths[0]
     else:
         raise ValueError("Must provide either data_paths or hf_repo")
+
+    dataloader = create_dataloader(
+        source=source,
+        pp=pp_str,
+        batch_size=config.batch_size,
+        num_workers=config.num_workers,
+        seed=config.seed,
+        return_labels=True,
+    )
 
     data_iter = iter(dataloader)
 
