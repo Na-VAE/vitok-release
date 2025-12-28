@@ -207,8 +207,144 @@ def _unpack_images(images: torch.Tensor, orig_h: torch.Tensor, orig_w: torch.Ten
     return cropped
 
 
+class RandomTileSampler:
+    """Sample random tiles from images for computing perceptual losses.
+
+    For computing SSIM/LPIPS/DINO losses on variable-resolution images,
+    we sample fixed-size tiles rather than resizing the full image.
+
+    Args:
+        n_tiles: Number of tiles to sample per image
+        tile_size: (height, width) of each tile
+        spatial_stride: Patch size used by the model
+        coverage: Sampling strategy - "uniform_pixel" or "uniform_topleft"
+    """
+
+    def __init__(
+        self,
+        n_tiles: int = 2,
+        tile_size: tuple = (256, 256),
+        spatial_stride: int = 16,
+        coverage: str = "uniform_pixel",
+    ):
+        assert coverage in ("uniform_pixel", "uniform_topleft")
+        self.n_tiles = n_tiles
+        self.tile_h, self.tile_w = tile_size
+        self.spatial_stride = spatial_stride
+        self.coverage = coverage
+
+    @staticmethod
+    def _sample_int(max_inclusive: torch.Tensor, n_samples: int) -> torch.Tensor:
+        """Sample random integers in [0, max_inclusive] for each batch item."""
+        if max_inclusive.dim() == 0:
+            max_inclusive = max_inclusive.unsqueeze(0)
+        B = max_inclusive.shape[0]
+        r = torch.rand(B, n_samples, device=max_inclusive.device)
+        max_expanded = max_inclusive.unsqueeze(1).expand(-1, n_samples).float()
+        return (r * (max_expanded + 1.0)).floor().long()
+
+    def _sample_start_positions(
+        self,
+        orig_h: torch.Tensor,
+        orig_w: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Sample tile top-lefts in original image coordinates."""
+        max_sy = torch.clamp(orig_h - self.tile_h, min=0)
+        max_sx = torch.clamp(orig_w - self.tile_w, min=0)
+
+        if self.coverage == "uniform_topleft":
+            start_y = self._sample_int(max_sy, self.n_tiles)
+            start_x = self._sample_int(max_sx, self.n_tiles)
+        else:  # uniform_pixel
+            half_h = self.tile_h // 2
+            half_w = self.tile_w // 2
+            # Prefer centers whose tiles fully fit in the original image.
+            min_center_y = torch.full_like(orig_h, half_h)
+            min_center_x = torch.full_like(orig_w, half_w)
+            max_center_y = orig_h - self.tile_h + half_h
+            max_center_x = orig_w - self.tile_w + half_w
+
+            valid_y = max_center_y >= min_center_y
+            valid_x = max_center_x >= min_center_x
+
+            range_y = torch.where(valid_y, max_center_y - min_center_y, orig_h - 1)
+            range_x = torch.where(valid_x, max_center_x - min_center_x, orig_w - 1)
+            range_y = torch.clamp(range_y, min=0)
+            range_x = torch.clamp(range_x, min=0)
+
+            offset_y = torch.where(valid_y, min_center_y, torch.zeros_like(min_center_y))
+            offset_x = torch.where(valid_x, min_center_x, torch.zeros_like(min_center_x))
+
+            pixel_y = self._sample_int(range_y, self.n_tiles) + offset_y.unsqueeze(1)
+            pixel_x = self._sample_int(range_x, self.n_tiles) + offset_x.unsqueeze(1)
+            start_y = pixel_y - half_h
+            start_x = pixel_x - half_w
+
+        return start_y, start_x
+
+    def __call__(
+        self,
+        images_2d: torch.Tensor,
+        patches_dict: Dict[str, torch.Tensor],
+        indices: Optional[tuple] = None,
+    ) -> tuple:
+        """Sample tiles from images.
+
+        Args:
+            images_2d: Reconstructed images (B, C, H, W)
+            patches_dict: Patch dict with 'original_height', 'original_width'
+            indices: Optional precomputed indices for deterministic sampling
+
+        Returns:
+            tiles: (B, n_tiles, C, tile_h, tile_w) tensor
+            indices: (batch_idx, start_y, start_x) tuple for reproducibility
+        """
+        device = images_2d.device
+        B, C, H, W = images_2d.shape
+
+        orig_h = patches_dict["original_height"].to(device).long()
+        orig_w = patches_dict["original_width"].to(device).long()
+
+        # Pad if canvas is smaller than tile
+        pad_h = max(self.tile_h - H, 0)
+        pad_w = max(self.tile_w - W, 0)
+        if pad_h or pad_w:
+            images_2d = F.pad(images_2d, (0, pad_w, 0, pad_h), value=-1.0)
+        _, _, padded_H, padded_W = images_2d.shape
+
+        if indices is None:
+            start_y, start_x = self._sample_start_positions(orig_h, orig_w)
+        else:
+            batch_idx_flat, start_y_flat, start_x_flat = indices
+            start_y = start_y_flat.view(B, self.n_tiles)
+            start_x = start_x_flat.view(B, self.n_tiles)
+
+        # Clamp to padded canvas
+        start_y = torch.clamp(start_y, min=0, max=padded_H - self.tile_h)
+        start_x = torch.clamp(start_x, min=0, max=padded_W - self.tile_w)
+
+        # Build index grids and gather tiles
+        off_y = torch.arange(self.tile_h, device=device)
+        off_x = torch.arange(self.tile_w, device=device)
+        y_idx = start_y[:, :, None, None] + off_y[None, None, :, None]
+        x_idx = start_x[:, :, None, None] + off_x[None, None, None, :]
+        batch_idx = torch.arange(B, device=device)[:, None, None, None]
+
+        # Gather tiles
+        imgs_nhwc = images_2d.permute(0, 2, 3, 1)  # (B, H, W, C)
+        tiles = imgs_nhwc[batch_idx, y_idx, x_idx]  # (B, n, h, w, C)
+        tiles = tiles.permute(0, 1, 4, 2, 3).contiguous()  # (B, n, C, h, w)
+
+        # Return indices for reproducibility
+        batch_idx_flat = torch.repeat_interleave(
+            torch.arange(B, device=device), self.n_tiles
+        )
+        return tiles, (batch_idx_flat, start_y.flatten(), start_x.flatten())
+
+
 __all__ = [
     "preprocess_images",
     "postprocess_images",
     "unpatchify",
+    "RandomTileSampler",
 ]
