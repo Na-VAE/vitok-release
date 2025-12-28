@@ -114,36 +114,37 @@ class DiT(nn.Module):
         width: int = 1024,
         depth: int = 24,
         num_heads: int = 16,
-        mlp_ratio: float = 2.67,
-        freq_dim: int = 256,
-        checkpoint: int = 0,
         num_tokens: int = 256,
-        rope_theta: float = 10000.0,
+        checkpoint: int = 0,
+        float8: bool = False,
         use_layer_scale: bool = True,
         layer_scale_init: float = 1e-4,
         sw: Optional[int] = None,
-        sw_every: int = 2,
-        float8: bool = False,
-        mod_tanh: float = 3.0,
         class_token: bool = False,
         reg_tokens: int = 0,
         train_seq_len: Optional[int] = None,
+        **kwargs,
     ):
         super().__init__()
+
+        # Hardcoded hyperparameters
+        rope_theta = 10000.0
+        mlp_ratio = 2.67
+        mod_tanh = 3.0
+        sw_every = 2
+        freq_dim = 256
 
         self.text_dim = text_dim
         self.code_width = code_width
         self.width = width
         self.depth = depth
         self.num_heads = num_heads
-        self.mlp_ratio = mlp_ratio
-        self.freq_dim = freq_dim
         self.checkpoint = checkpoint
         self.num_tokens = num_tokens
         self.rope_theta = rope_theta
         self.sw = sw if (sw is None or sw > 0) else None
         self.sw_every = sw_every
-        self.mod_tanh = float(mod_tanh or 0.0)
+        self.mod_tanh = mod_tanh
         self.class_token = class_token
         self.reg_tokens = reg_tokens
         self.num_special_tokens = (1 if class_token else 0) + reg_tokens
