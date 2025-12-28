@@ -97,6 +97,8 @@ def main():
     parser.add_argument("--log_freq", type=int, default=100)
     parser.add_argument("--eval_freq", type=int, default=5000,
                         help="Frequency for running evaluation")
+    parser.add_argument("--eval_data", type=str, default=None,
+                        help="Separate validation data source (e.g., hf://ILSVRC/imagenet-1k/val/*.tar)")
     parser.add_argument("--save_freq", type=int, default=5000)
     parser.add_argument("--marked_freq", type=int, default=25000,
                         help="Frequency for marked checkpoints (0 to disable)")
@@ -235,6 +237,21 @@ def main():
     eval_metrics = MetricCalculator(metrics=('ssim', 'psnr'))
     eval_metrics.move_model_to_device(device)
 
+    # Separate eval dataloader (if provided)
+    eval_loader = None
+    eval_iter = None
+    if args.eval_data and args.eval_freq > 0:
+        if rank == 0:
+            print(f"Loading eval data from: {args.eval_data}")
+        eval_loader = create_dataloader(
+            source=args.eval_data,
+            pp=pp_string,
+            batch_size=args.batch_size,
+            num_workers=2,
+            seed=args.seed,
+        )
+        eval_iter = iter(eval_loader)
+
     # Training loop
     if rank == 0:
         print(f"\nStarting training for {args.steps} steps...")
@@ -365,7 +382,8 @@ def main():
             model.eval()
             eval_metrics.reset()
 
-            # Run a few batches for quick eval
+            # Use separate eval loader if provided, otherwise use training loader
+            use_eval_iter = eval_iter if eval_iter is not None else loader_iter
             n_eval_batches = 10
             all_ref = []
             all_recon = []
@@ -373,10 +391,15 @@ def main():
             with torch.no_grad():
                 for _ in range(n_eval_batches):
                     try:
-                        eval_batch, _ = next(loader_iter)
+                        eval_batch, _ = next(use_eval_iter)
                     except StopIteration:
-                        loader_iter = iter(loader)
-                        eval_batch, _ = next(loader_iter)
+                        if eval_iter is not None:
+                            eval_iter = iter(eval_loader)
+                            use_eval_iter = eval_iter
+                        else:
+                            loader_iter = iter(loader)
+                            use_eval_iter = loader_iter
+                        eval_batch, _ = next(use_eval_iter)
 
                     eval_batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in eval_batch.items()}
                     if 'patches' in eval_batch:
@@ -407,7 +430,8 @@ def main():
             eval_stats = eval_metrics.gather()
 
             if rank == 0:
-                print(f"[Eval @ {step}] SSIM: {eval_stats.get('ssim', 0):.4f} | PSNR: {eval_stats.get('psnr', 0):.2f}")
+                eval_source = "val" if args.eval_data else "train"
+                print(f"[Eval @ {step}] ({eval_source}) SSIM: {eval_stats.get('ssim', 0):.4f} | PSNR: {eval_stats.get('psnr', 0):.2f}")
 
             if wandb_enabled:
                 wandb.log({f"eval/{k}": v for k, v in eval_stats.items()}, step=step)
