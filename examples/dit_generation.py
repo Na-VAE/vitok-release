@@ -34,7 +34,7 @@ from vitok import AEConfig, load_ae
 from vitok import DiTConfig, load_dit
 from vitok.diffusion import FlowMatchingScheduler
 from vitok.diffusion.flow_matching import euler_sample
-from vitok.datasets.io import postprocess_images
+from vitok import postprocess_images
 
 
 # ImageNet class names for common classes

@@ -31,7 +31,7 @@ from vitok import AEConfig, create_ae, load_ae
 from vitok import DiTConfig, create_dit, load_dit
 from vitok import StreamingWebDatasetConfig, create_streaming_dataloader
 from vitok.diffusion import FlowMatchingScheduler
-from vitok.datasets.io import postprocess_images
+from vitok import postprocess_images
 from vitok.utils.weights import load_weights
 
 

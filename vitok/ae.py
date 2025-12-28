@@ -8,7 +8,6 @@ from typing import Optional
 import torch
 
 from vitok.configs.variant_parser import decode_ae_variant
-from vitok.datasets.io import preprocess_images, postprocess_images
 from vitok.models.ae import AE as _AE
 from vitok.utils.weights import load_weights
 
@@ -129,6 +128,4 @@ __all__ = [
     "AEConfig",
     "create_ae",
     "load_ae",
-    "preprocess_images",
-    "postprocess_images",
 ]

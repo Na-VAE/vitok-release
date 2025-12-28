@@ -19,7 +19,7 @@ from PIL import Image
 import numpy as np
 
 from vitok import AEConfig, load_ae
-from vitok.datasets.io import preprocess_images, postprocess_images
+from vitok import preprocess_images, postprocess_images
 
 
 def main():
