@@ -1,109 +1,320 @@
-"""HuggingFace streaming WebDataset wrapper."""
+"""Data loading with preprocessing DSL.
+
+Example:
+    loader = create_dataloader(
+        source="hf://imagenet-1k/train/*.tar",
+        pp="random_resized_crop(512)|flip|to_tensor|normalize(minus_one_to_one)|patchify(512, 16, 256)",
+        batch_size=32,
+    )
+"""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Optional, Sequence
+import random
+from pathlib import Path
+from typing import Callable, List, Optional
 
-from vitok.transforms import TransformCfg, build_transform, patch_collate_fn
-from vitok.datasets.webdataset import HFWebDataset
+import torch
+import torch.distributed as dist
+import webdataset as wds
+from PIL import Image, ImageOps
+
+from vitok.pp import build_transform
 
 
-@dataclass(frozen=True)
-class StreamingWebDatasetConfig:
-    """Configuration for HuggingFace streaming WebDataset.
+def patch_collate_fn(batch):
+    """Collate function for patchified data.
 
-    Args:
-        hf_repo: HuggingFace dataset repository (e.g., "imagenet-1k")
-        hf_revision: Repository revision/branch
-        hf_subdir: Optional subdirectory in the repository
-        hf_patterns: Optional glob patterns for shard files
-        max_shards: Optional limit on number of shards
-        batch_size: Batch size
-        num_workers: Number of data loader workers
-        prefetch_factor: Prefetch factor for data loader
-        seed: Random seed
-        train: Whether to apply training augmentations
-        patch_size: Patch size in pixels
-        max_tokens: Maximum sequence length
-        train_max_grid_size: Max grid size for training
-        posemb_max_grid_size: Max grid size for positional embeddings
-        min_size: Minimum image dimension
-        max_size: Maximum image dimension
-        normalise: Normalization mode
-        use_naflex_posemb: Enable NaFlex positional embeddings
-        return_labels: Whether to return labels
-        label_key: Key for label in WebDataset samples
+    Handles:
+    - (dict, label) tuples from patchified pipelines
+    - (tensor, label) tuples from square image pipelines
+    - plain dicts or tensors (no labels)
     """
+    if len(batch) == 0:
+        return {}, None
 
-    hf_repo: str
-    hf_revision: str = "main"
-    hf_subdir: Optional[str] = None
-    hf_patterns: Optional[Sequence[str]] = None
-    max_shards: Optional[int] = None
-    batch_size: int = 32
-    num_workers: int = 4
-    prefetch_factor: int = 4
-    seed: int = 0
-    train: bool = True
-    patch_size: int = 16
-    max_tokens: int = 256
-    train_max_grid_size: int = 48
-    posemb_max_grid_size: int = 256
-    min_size: int = 224
-    max_size: int = 1024
-    normalise: str = "minus_one_to_one"
-    use_naflex_posemb: bool = True
-    return_labels: bool = False
-    label_key: str = "cls"
+    if isinstance(batch[0], tuple):
+        patch_dicts, labels = zip(*batch)
+        labels = torch.tensor(labels, dtype=torch.long) if labels[0] is not None else None
+    else:
+        patch_dicts = batch
+        labels = None
+
+    if isinstance(patch_dicts[0], torch.Tensor):
+        return torch.stack(patch_dicts, dim=0), labels
+
+    collated = {}
+    for k in patch_dicts[0].keys():
+        items = [d[k] for d in patch_dicts]
+        if isinstance(items[0], torch.Tensor):
+            collated[k] = torch.stack(items, dim=0)
+        else:
+            collated[k] = items
+
+    return collated, labels
 
 
-def create_streaming_dataloader(config: StreamingWebDatasetConfig):
-    """Create a WebDataset dataloader backed by HuggingFace streaming shards.
+def create_dataloader(
+    source: str,
+    pp: str,
+    batch_size: int = 32,
+    num_workers: int = 4,
+    seed: int = 0,
+    prefetch_factor: int = 4,
+    min_size: Optional[int] = None,
+    return_labels: bool = False,
+    label_key: str = "cls",
+    shuffle_buffer: int = 100000,
+) -> wds.WebLoader:
+    """Create a dataloader from source with preprocessing.
 
     Args:
-        config: StreamingWebDatasetConfig instance
+        source: Data source. Formats:
+            - "hf://repo/subdir/*.tar" for HuggingFace Hub
+            - "/path/to/*.tar" or "/path/to/dir" for local WebDataset
+        pp: Preprocessing string, e.g.:
+            "random_resized_crop(512)|flip|to_tensor|normalize(minus_one_to_one)|patchify(512, 16, 256)"
+        batch_size: Batch size
+        num_workers: DataLoader workers
+        seed: Random seed for shuffling
+        prefetch_factor: Prefetch factor
+        min_size: Optional minimum image size filter
+        return_labels: Whether to return labels
+        label_key: Key for labels in WebDataset samples
+        shuffle_buffer: Shuffle buffer size
 
     Returns:
-        DataLoader that yields (patch_dict, labels) tuples
+        WebLoader yielding (batch_dict, labels) tuples
     """
-    transform_cfg = TransformCfg(
-        train=config.train,
-        patch_size=config.patch_size,
-        max_tokens=config.max_tokens,
-        train_max_grid_size=config.train_max_grid_size,
-        posemb_max_grid_size=config.posemb_max_grid_size,
-        min_size=config.min_size,
-        max_size=config.max_size,
-        normalise=config.normalise,
-        augmentation_strategy="naflex",
-        use_naflex_posemb=config.use_naflex_posemb,
-    )
-    transform = build_transform(transform_cfg, input_format="pil")
+    transform = build_transform(pp)
 
-    dataset = HFWebDataset(
-        hf_repo=config.hf_repo,
-        hf_revision=config.hf_revision,
-        hf_subdir=config.hf_subdir,
-        hf_patterns=config.hf_patterns,
-        max_shards=config.max_shards,
+    if source.startswith("hf://"):
+        # HuggingFace Hub streaming
+        tar_files = _get_hf_shard_urls(source)
+    else:
+        # Local WebDataset
+        tar_files = _get_local_tar_files(source)
+
+    if not tar_files:
+        raise ValueError(f"No tar files found for source: {source}")
+
+    dataset = _WebDatasetWrapper(
+        tar_files=tar_files,
         transform=transform,
-        collate_fn=patch_collate_fn,
-        batch_size=config.batch_size,
-        num_workers=config.num_workers,
-        prefetch_factor=config.prefetch_factor,
-        seed=config.seed,
-        min_size=config.min_size,
-        patch_size=config.patch_size,
-        max_tokens=config.max_tokens,
-        max_grid_size=config.train_max_grid_size,
-        return_labels=config.return_labels,
-        label_key=config.label_key,
+        batch_size=batch_size,
+        seed=seed,
+        shuffle_buffer=shuffle_buffer,
+        min_size=min_size,
+        return_labels=return_labels,
+        label_key=label_key,
     )
-    return dataset.create_dataloader()
+
+    loader = wds.WebLoader(
+        dataset.build(),
+        batch_size=None,
+        num_workers=num_workers,
+        prefetch_factor=prefetch_factor if num_workers > 0 else None,
+        pin_memory=True,
+        persistent_workers=num_workers > 0,
+    )
+    return loader
 
 
-__all__ = [
-    "StreamingWebDatasetConfig",
-    "create_streaming_dataloader",
-]
+def _get_hf_shard_urls(source: str) -> List[str]:
+    """Parse hf://repo/subdir/*.tar and get streaming URLs."""
+    try:
+        from huggingface_hub import HfFileSystem
+    except ImportError:
+        raise ImportError("huggingface_hub is required for HuggingFace sources")
+
+    # Parse: hf://repo/subdir/*.tar or hf://repo/*.tar
+    if not source.startswith("hf://"):
+        raise ValueError(f"Expected hf:// source, got: {source}")
+
+    path = source[5:]  # Remove "hf://"
+    parts = path.split("/")
+
+    if len(parts) < 2:
+        raise ValueError(f"Invalid hf:// source format: {source}")
+
+    # Find pattern (last part with *)
+    pattern_idx = None
+    for i, part in enumerate(parts):
+        if "*" in part:
+            pattern_idx = i
+            break
+
+    if pattern_idx is None:
+        # No pattern, assume *.tar
+        repo = "/".join(parts)
+        subdir = None
+        pattern = "*.tar"
+    else:
+        repo = "/".join(parts[:pattern_idx])
+        pattern = parts[pattern_idx]
+        subdir = "/".join(parts[pattern_idx + 1:]) if pattern_idx + 1 < len(parts) else None
+
+    # Handle repo/subdir split
+    if "/" in repo and not any(c in repo for c in ["*", "?"]):
+        # Could be org/repo/subdir
+        repo_parts = repo.split("/")
+        if len(repo_parts) > 2:
+            repo = "/".join(repo_parts[:2])
+            subdir = "/".join(repo_parts[2:])
+
+    fs = HfFileSystem()
+    prefix = f"datasets/{repo}"
+    if subdir:
+        prefix = f"{prefix}/{subdir}"
+
+    glob_pattern = f"{prefix}/{pattern}"
+    shard_urls = []
+
+    try:
+        matches = fs.glob(glob_pattern)
+        for match in matches:
+            # Build streaming URL
+            rel_path = match.replace(f"datasets/{repo}/", "")
+            url = f"pipe:curl -s -L https://huggingface.co/datasets/{repo}/resolve/main/{rel_path}"
+            shard_urls.append(url)
+    except Exception as e:
+        raise ValueError(f"Failed to find shards at {glob_pattern}: {e}")
+
+    return sorted(shard_urls)
+
+
+def _get_local_tar_files(source: str) -> List[str]:
+    """Get local tar files from path or glob pattern."""
+    path = Path(source)
+
+    if "*" in source:
+        # Glob pattern
+        parent = path.parent
+        pattern = path.name
+        if parent.exists():
+            return sorted(str(f) for f in parent.glob(pattern))
+        return []
+
+    if path.is_file() and path.suffix == ".tar":
+        return [str(path)]
+
+    if path.is_dir():
+        return sorted(str(f) for f in path.rglob("*.tar"))
+
+    return []
+
+
+class _WebDatasetWrapper:
+    """Internal wrapper for building WebDataset pipelines."""
+
+    def __init__(
+        self,
+        tar_files: List[str],
+        transform: Callable,
+        batch_size: int,
+        seed: int,
+        shuffle_buffer: int,
+        min_size: Optional[int],
+        return_labels: bool,
+        label_key: str,
+    ):
+        self.tar_files = tar_files
+        self.transform = transform
+        self.batch_size = batch_size
+        self.seed = seed
+        self.shuffle_buffer = shuffle_buffer
+        self.min_size = min_size
+        self.return_labels = return_labels
+        self.label_key = label_key
+
+    def build(self):
+        """Build the WebDataset pipeline."""
+        rank = dist.get_rank() if dist.is_initialized() else 0
+        world_size = dist.get_world_size() if dist.is_initialized() else 1
+
+        # Shuffle and split tar files by rank
+        tar_rng = random.Random(self.seed)
+        tar_files = self.tar_files[:]
+        tar_rng.shuffle(tar_files)
+        rank_tar_files = [tar_files[i] for i in range(rank, len(tar_files), world_size)]
+
+        sample_shuffle_seed = self.seed + rank
+
+        dataset = (
+            wds.WebDataset(
+                rank_tar_files,
+                handler=wds.ignore_and_continue,
+                nodesplitter=wds.split_by_node,
+                shardshuffle=False,
+                resampled=True,
+            )
+            .shuffle(self.shuffle_buffer, seed=sample_shuffle_seed)
+            .decode("pil", handler=wds.ignore_and_continue)
+            .select(self._has_image)
+            .map(self._normalize_keys)
+            .map_dict(jpg=self._ensure_rgb)
+            .select(self._filter_size)
+            .map(self._process)
+            .batched(self.batch_size, partial=False, collation_fn=patch_collate_fn)
+        )
+        return dataset
+
+    @staticmethod
+    def _has_image(sample: dict) -> bool:
+        return any(k in sample for k in ("jpg", "jpeg", "png", "webp"))
+
+    @staticmethod
+    def _normalize_keys(sample: dict) -> dict:
+        for key in ("jpg", "jpeg", "png", "webp"):
+            if key in sample:
+                if key != "jpg":
+                    sample["jpg"] = sample[key]
+                return sample
+        return sample
+
+    @staticmethod
+    def _ensure_rgb(img: Image.Image) -> Image.Image:
+        try:
+            img = ImageOps.exif_transpose(img)
+        except Exception:
+            pass
+
+        if img.mode == "P" and "transparency" in getattr(img, "info", {}):
+            img = img.convert("RGBA")
+
+        if img.mode in ("RGBA", "LA"):
+            if img.mode != "RGBA":
+                img = img.convert("RGBA")
+            bg = Image.new("RGBA", img.size, (255, 255, 255, 255))
+            img = Image.alpha_composite(bg, img).convert("RGB")
+        elif img.mode != "RGB":
+            img = img.convert("RGB")
+
+        return img
+
+    def _filter_size(self, sample: dict) -> bool:
+        if self.min_size is None:
+            return True
+        w, h = sample["jpg"].size
+        return min(w, h) >= self.min_size
+
+    def _process(self, sample: dict):
+        image = sample["jpg"]
+        result = self.transform(image)
+
+        label = 0
+        if self.return_labels:
+            raw = sample.get(self.label_key)
+            if raw is not None:
+                try:
+                    if isinstance(raw, (bytes, bytearray)):
+                        label = int(raw.decode("utf-8").strip())
+                    elif isinstance(raw, (str, int)):
+                        label = int(raw)
+                except Exception:
+                    label = 0
+
+        return result, label
+
+
+__all__ = ["create_dataloader", "patch_collate_fn"]
