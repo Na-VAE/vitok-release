@@ -28,7 +28,7 @@ from PIL import Image
 from vitok import AEConfig, load_ae
 from vitok import DiTConfig, load_dit
 from vitok.diffusion import FlowUniPCMultistepScheduler
-from vitok.datasets.io import postprocess_images
+from vitok.naflex_io import postprocess_images
 
 
 def sample_images(

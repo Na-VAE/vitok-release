@@ -36,8 +36,7 @@ import numpy as np
 
 from vitok import AEConfig, load_ae
 from vitok import DiTConfig, load_dit
-from vitok.diffusion import FlowMatchingScheduler
-from vitok.diffusion.flow_matching import euler_sample
+from vitok.diffusion import FlowUniPCMultistepScheduler
 from vitok import postprocess_images
 
 
@@ -67,6 +66,7 @@ def generate_batch(
     image_size: int,
     device: torch.device,
     dtype: torch.dtype,
+    num_classes: int = 1000,
 ) -> list:
     """Generate a batch of images."""
     batch_size = len(class_labels)
@@ -78,26 +78,39 @@ def generate_batch(
     code_width = dit.code_width if hasattr(dit, 'code_width') else 64
 
     # Initialize noise
-    z = torch.randn(batch_size, num_tokens, code_width, device=device, dtype=torch.float32)
+    latents = torch.randn(batch_size, num_tokens, code_width, device=device, dtype=torch.float32)
+
+    # Null labels for CFG
+    labels_null = torch.full_like(class_labels, num_classes)
 
     # Create scheduler
-    scheduler = FlowMatchingScheduler()
+    scheduler = FlowUniPCMultistepScheduler(thresholding=False)
+    scheduler.set_timesteps(num_steps)
 
     def autocast_ctx():
         return torch.autocast(device_type='cuda', dtype=dtype)
 
     # Sample
     with torch.no_grad():
-        z_denoised = euler_sample(
-            dit,
-            scheduler,
-            z,
-            class_labels,
-            num_steps=num_steps,
-            cfg_scale=cfg_scale,
-            device=device,
-            autocast_ctx=autocast_ctx,
-        )
+        for t in scheduler.timesteps:
+            t_batch = t.expand(batch_size)
+
+            if cfg_scale != 1.0:
+                # Batched CFG
+                x_in = torch.cat([latents, latents], dim=0)
+                t_in = torch.cat([t_batch, t_batch], dim=0)
+                y_in = torch.cat([labels_null, class_labels], dim=0)
+
+                with autocast_ctx():
+                    out = dit({"z": x_in, "t": t_in, "context": y_in})
+
+                uncond, cond = out.chunk(2, dim=0)
+                v_pred = uncond + cfg_scale * (cond - uncond)
+            else:
+                with autocast_ctx():
+                    v_pred = dit({"z": latents, "t": t_batch, "context": class_labels})
+
+            latents = scheduler.step(v_pred.float(), t, latents, return_dict=False)[0]
 
         # Create decode dict
         y, x = torch.meshgrid(
@@ -107,7 +120,7 @@ def generate_batch(
         )
 
         decode_dict = {
-            'z': z_denoised.to(dtype),
+            'z': latents.to(dtype),
             'ptype': torch.ones(batch_size, num_tokens, dtype=torch.bool, device=device),
             'yidx': y.flatten().unsqueeze(0).expand(batch_size, -1),
             'xidx': x.flatten().unsqueeze(0).expand(batch_size, -1),
@@ -260,6 +273,7 @@ def main():
                 image_size=args.image_size,
                 device=device,
                 dtype=dtype,
+                num_classes=args.num_classes,
             )
 
             # Save individual images
