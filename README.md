@@ -191,8 +191,8 @@ This implementation builds upon ideas from the original ViTok work:
 
 This is a PyTorch reimplementation designed for simplicity and flexibility, supporting single GPU, single node, and multi-node training environments. The codebase is based on a refactor of:
 
-- [ViTok](https://github.com/google-research/big_vision) (JAX, part of big_vision)
-- [big_vision](https://github.com/google-research/big_vision) by Google Research
+- [vitok](https://github.com/philippe-eecs/vitok) (PyTorch)
+- [big_vision](https://github.com/google-research/big_vision) by Google Research (JAX)
 
 ## Disclaimer
 
