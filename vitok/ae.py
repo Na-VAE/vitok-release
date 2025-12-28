@@ -8,7 +8,6 @@ from typing import Optional
 import torch
 
 from vitok.configs.variant_parser import decode_ae_variant
-from vitok.datasets.io import preprocess_images, postprocess_images
 from vitok.models.ae import AE as _AE
 from vitok.utils.weights import load_weights
 
@@ -29,6 +28,8 @@ class AEConfig:
         class_token: Add learnable class token
         reg_tokens: Number of register tokens
         train_seq_len: Training sequence length for block mask precomputation
+        encoder: Include encoder (set False for decoder-only)
+        decoder: Include decoder (set False for encoder-only)
     """
 
     variant: str = "B/1x16x64"
@@ -42,6 +43,8 @@ class AEConfig:
     class_token: bool = False
     reg_tokens: int = 0
     train_seq_len: Optional[int] = None
+    encoder: bool = True
+    decoder: bool = True
 
 
 def create_ae(config: AEConfig, **overrides) -> _AE:
@@ -67,6 +70,8 @@ def create_ae(config: AEConfig, **overrides) -> _AE:
         "class_token": config.class_token,
         "reg_tokens": config.reg_tokens,
         "train_seq_len": config.train_seq_len,
+        "encoder": config.encoder,
+        "decoder": config.decoder,
         **overrides,
     }
     return _AE(**kwargs)
@@ -123,6 +128,4 @@ __all__ = [
     "AEConfig",
     "create_ae",
     "load_ae",
-    "preprocess_images",
-    "postprocess_images",
 ]

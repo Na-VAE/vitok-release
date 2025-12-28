@@ -31,8 +31,7 @@ pip install -e ".[dev]"
 ### Encode and Decode Images
 
 ```python
-from vitok import AEConfig, load_ae
-from vitok.datasets.io import preprocess_images, postprocess_images
+from vitok import AEConfig, load_ae, preprocess_images, postprocess_images
 from PIL import Image
 
 # Load pretrained AE

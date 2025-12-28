@@ -78,23 +78,13 @@ class Block(nn.Module):
         use_layer_scale: bool = True,
         layer_scale_init: float = 1e-6,
         drop_path: float = 0.0,
-        mlp_dropout: float = 0.0,
         sliding_window: Optional[int] = None,
     ) -> None:
         super().__init__()
 
-        self.parallel_mlp_attn = parallel_mlp_attn
-        self.use_layer_scale = use_layer_scale
         self.sliding_window = sliding_window
 
-        if norm_type == "layernorm":
-            self.norm1 = LayerNorm(dim)
-            self.norm2 = LayerNorm(dim) if not parallel_mlp_attn else None
-        elif norm_type == "rmsnorm":
-            self.norm1 = RMSNorm(dim)
-            self.norm2 = RMSNorm(dim) if not parallel_mlp_attn else None
-        else:
-            raise ValueError(f"Unsupported norm type: {norm_type}")
+        self.norm1 = RMSNorm(dim)
 
         self.attn = Attention(
             dim=dim,
@@ -102,7 +92,7 @@ class Block(nn.Module):
             num_special_tokens=num_special_tokens,
             qk_norm=qk_norm,
         )
-        self.ffn = SwiGLU(dim, hidden_dim=ffn_dim, dropout=float(mlp_dropout) if mlp_dropout else 0.0)
+        self.ffn = SwiGLU(dim, hidden_dim=ffn_dim)
         self.layer_scale = LayerScale(dim, layer_scale_init) if use_layer_scale else nn.Identity()
         self.drop_path = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
 
@@ -113,22 +103,17 @@ class Block(nn.Module):
         score_mod=None,
         block_mask=None,
     ) -> torch.Tensor:
-        norm_attn = self.norm1(x)
-        norm_mlp = self.norm2(x) if self.norm2 is not None else norm_attn
-
+        h = self.norm1(x)
         attn_out = self.attn(
-            norm_attn,
+            h,
             freqs_cis=freqs_cis,
             sliding_window=self.sliding_window,
             score_mod=score_mod,
             block_mask=block_mask,
         )
-        mlp_out = self.ffn(norm_mlp)
-
-        combined = attn_out + mlp_out
-        combined = self.layer_scale(combined)
-        combined = self.drop_path(combined)
-        return x + combined
+        mlp_out = self.ffn(h)
+        combined = self.layer_scale(attn_out + mlp_out)
+        return x + self.drop_path(combined)
 
 
 class AE(nn.Module):

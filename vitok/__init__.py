@@ -2,9 +2,14 @@
 
 from vitok.ae import AE, AEConfig, create_ae, load_ae
 from vitok.dit import DiT, DiTConfig, create_dit, load_dit
-from vitok.naflex import NaFlexConfig, build_naflex_transform, naflex_batch
+from vitok.naflex_io import (
+    NaFlexConfig,
+    build_naflex_transform,
+    naflex_batch,
+    preprocess_images,
+    postprocess_images,
+)
 from vitok.data import StreamingWebDatasetConfig, create_streaming_dataloader
-from vitok.datasets.io import preprocess_images, postprocess_images
 
 __version__ = "0.1.0"
 
