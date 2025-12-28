@@ -2,6 +2,8 @@
 
 **ViTok** (Vision Transformer Tokenizer) is a ViT-based image tokenizer designed for generative models. It features native aspect-ratio support via NaFlex patchification, enabling deployment at arbitrary resolutions while maintaining the scaling advantages of Vision Transformer architectures.
 
+> **Note**: This is an independent public reimplementation and is not affiliated with Meta. The original research was conducted at Meta using a separate internal codebase.
+
 ## Key Features
 
 - **NaFlex Patchification**: Native aspect-ratio training with flexible token budgets
@@ -151,20 +153,22 @@ vitok/
 └── modal/                    # GPU testing infrastructure
 ```
 
-## Authors
+## Original Research Authors
 
-- Philippe Hansen-Estruch (UT Austin, Meta)
-- Jiahui Chen (UT Austin, Meta)
+The original ViTok research was conducted by:
+
+- Philippe Hansen-Estruch (UT Austin)
+- Jiahui Chen (UT Austin)
 - Vivek Ramanujan (University of Washington)
 - Orr Zohar (Stanford University)
 - Yan Ping (Spellbrush)
-- Animesh Sinha (Meta)
-- Markos Georgopoulos (Meta)
-- Edgar Schoenfeld (Meta)
-- Ji Hou (Meta)
-- Felix Juefei-Xu (Meta)
+- Animesh Sinha
+- Markos Georgopoulos
+- Edgar Schoenfeld
+- Ji Hou
+- Felix Juefei-Xu
 - Sriram Vishwanath (Georgia Tech)
-- Ali Thabet (Meta)
+- Ali Thabet
 
 ## License
 
@@ -181,6 +185,6 @@ MIT License
 }
 ```
 
-## Acknowledgments
+## Disclaimer
 
-This work was conducted at Meta Superintelligence Labs in collaboration with UT Austin, Stanford University, University of Washington, Georgia Tech, and Spellbrush.
+This repository is an independent public reimplementation of the ViTok architecture. It is not affiliated with, endorsed by, or connected to Meta in any way. The original research was conducted at Meta using a separate internal codebase that is not publicly available.
