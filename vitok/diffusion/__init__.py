@@ -1,5 +1,7 @@
-"""Diffusion utilities for DiT training and sampling."""
+"""Diffusion utilities for sampling."""
 
-from vitok.diffusion.flow_matching import FlowMatchingScheduler
+from vitok.diffusion.unipc import FlowUniPCMultistepScheduler
 
-__all__ = ["FlowMatchingScheduler"]
+__all__ = [
+    "FlowUniPCMultistepScheduler",
+]
