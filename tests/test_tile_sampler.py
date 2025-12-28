@@ -134,6 +134,19 @@ def _assert_indices_in_bounds(indices, padded_H, padded_W, tile_h, tile_w):
     assert start_x.max().item() <= padded_W - tile_w
 
 
+def _assert_indices_in_original(indices, orig_h, orig_w, tile_h, tile_w):
+    _, start_y, start_x = indices
+    B = orig_h.numel()
+    start_y = start_y.view(B, -1)
+    start_x = start_x.view(B, -1)
+    max_sy = (orig_h - tile_h).view(B, 1)
+    max_sx = (orig_w - tile_w).view(B, 1)
+    assert (start_y >= 0).all()
+    assert (start_x >= 0).all()
+    assert (start_y <= max_sy).all()
+    assert (start_x <= max_sx).all()
+
+
 @pytest.mark.parametrize("coverage", ["uniform_pixel", "uniform_topleft"])
 def test_random_tile_sampler_compatibility(coverage):
     images, patches_dict = _make_inputs()
@@ -173,3 +186,24 @@ def test_random_tile_sampler_compatibility(coverage):
     tiles_from_new, _ = legacy(images, patches_dict, indices=new_idx)
     assert torch.allclose(tiles_from_legacy, legacy_tiles)
     assert torch.allclose(tiles_from_new, new_tiles)
+
+
+def test_uniform_pixel_stays_in_original_bounds_when_possible():
+    images, patches_dict = _make_inputs()
+    tile_h, tile_w = 16, 20
+    n_tiles = 7
+
+    sampler = RandomTileSampler(
+        n_tiles=n_tiles,
+        tile_size=(tile_h, tile_w),
+        coverage="uniform_pixel",
+    )
+    torch.manual_seed(7)
+    _, indices = sampler(images, patches_dict)
+    _assert_indices_in_original(
+        indices,
+        patches_dict["original_height"],
+        patches_dict["original_width"],
+        tile_h,
+        tile_w,
+    )

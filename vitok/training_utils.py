@@ -266,3 +266,208 @@ def clip_grad_norm_(parameters, max_norm: float, use_fsdp: bool = False, world_s
         return total_norm
     else:
         return torch.nn.utils.clip_grad_norm_(params, max_norm, foreach=True)
+
+
+class CosineScheduler(Stateful):
+    """Cosine annealing LR scheduler with linear warmup."""
+
+    def __init__(self, optimizer, warmup_steps: int, total_steps: int,
+                 max_lr: float, min_lr: float = 1e-6, start_lr: float = 1e-7):
+        self.optimizer = optimizer
+        self.warmup_steps = warmup_steps
+        self.total_steps = total_steps
+        self.max_lr = max_lr
+        self.min_lr = min_lr
+        self.start_lr = start_lr
+        self.current_step = 0
+
+    def step(self) -> float:
+        """Step the scheduler and return current LR."""
+        self.current_step += 1
+        lr = self.get_lr()
+        for pg in self.optimizer.param_groups:
+            pg['lr'] = lr
+        return lr
+
+    def get_lr(self) -> float:
+        step = self.current_step
+        if step <= self.warmup_steps:
+            # Linear warmup
+            lr = self.start_lr + (self.max_lr - self.start_lr) * (step / max(1, self.warmup_steps))
+        else:
+            # Cosine decay
+            progress = (step - self.warmup_steps) / max(1, self.total_steps - self.warmup_steps)
+            lr = self.min_lr + (self.max_lr - self.min_lr) * 0.5 * (1 + np.cos(np.pi * progress))
+        return lr
+
+    def set_step(self, step: int):
+        self.current_step = step
+
+    def state_dict(self) -> Dict[str, Any]:
+        return {
+            'current_step': self.current_step,
+            'warmup_steps': self.warmup_steps,
+            'total_steps': self.total_steps,
+            'max_lr': self.max_lr,
+            'min_lr': self.min_lr,
+            'start_lr': self.start_lr,
+        }
+
+    def load_state_dict(self, state_dict: Dict[str, Any]):
+        self.current_step = state_dict.get('current_step', 0)
+        self.warmup_steps = state_dict.get('warmup_steps', self.warmup_steps)
+        self.total_steps = state_dict.get('total_steps', self.total_steps)
+        self.max_lr = state_dict.get('max_lr', self.max_lr)
+        self.min_lr = state_dict.get('min_lr', self.min_lr)
+        self.start_lr = state_dict.get('start_lr', self.start_lr)
+
+
+class LinearScheduler(Stateful):
+    """Linear warmup followed by constant LR."""
+
+    def __init__(self, optimizer, warmup_steps: int,
+                 max_lr: float, start_lr: float = 1e-7):
+        self.optimizer = optimizer
+        self.warmup_steps = warmup_steps
+        self.max_lr = max_lr
+        self.start_lr = start_lr
+        self.current_step = 0
+
+    def step(self) -> float:
+        self.current_step += 1
+        lr = self.get_lr()
+        for pg in self.optimizer.param_groups:
+            pg['lr'] = lr
+        return lr
+
+    def get_lr(self) -> float:
+        step = self.current_step
+        if step <= self.warmup_steps:
+            lr = self.start_lr + (self.max_lr - self.start_lr) * (step / max(1, self.warmup_steps))
+        else:
+            lr = self.max_lr
+        return lr
+
+    def set_step(self, step: int):
+        self.current_step = step
+
+    def state_dict(self) -> Dict[str, Any]:
+        return {
+            'current_step': self.current_step,
+            'warmup_steps': self.warmup_steps,
+            'max_lr': self.max_lr,
+            'start_lr': self.start_lr,
+        }
+
+    def load_state_dict(self, state_dict: Dict[str, Any]):
+        self.current_step = state_dict.get('current_step', 0)
+        self.warmup_steps = state_dict.get('warmup_steps', self.warmup_steps)
+        self.max_lr = state_dict.get('max_lr', self.max_lr)
+        self.start_lr = state_dict.get('start_lr', self.start_lr)
+
+
+class ExponentialDecayScheduler(Stateful):
+    """Linear warmup followed by exponential decay."""
+
+    def __init__(self, optimizer, warmup_steps: int, total_steps: int,
+                 max_lr: float, final_lr: float = 1e-6, start_lr: float = 1e-7):
+        self.optimizer = optimizer
+        self.warmup_steps = warmup_steps
+        self.total_steps = total_steps
+        self.max_lr = max_lr
+        self.final_lr = final_lr
+        self.start_lr = start_lr
+        self.current_step = 0
+
+        # Compute decay rate
+        decay_steps = max(1, total_steps - warmup_steps)
+        self.decay_rate = (final_lr / max_lr) ** (1.0 / decay_steps)
+
+    def step(self) -> float:
+        self.current_step += 1
+        lr = self.get_lr()
+        for pg in self.optimizer.param_groups:
+            pg['lr'] = lr
+        return lr
+
+    def get_lr(self) -> float:
+        step = self.current_step
+        if step <= self.warmup_steps:
+            lr = self.start_lr + (self.max_lr - self.start_lr) * (step / max(1, self.warmup_steps))
+        else:
+            decay_step = step - self.warmup_steps
+            lr = self.max_lr * (self.decay_rate ** decay_step)
+            lr = max(lr, self.final_lr)
+        return lr
+
+    def set_step(self, step: int):
+        self.current_step = step
+
+    def state_dict(self) -> Dict[str, Any]:
+        return {
+            'current_step': self.current_step,
+            'warmup_steps': self.warmup_steps,
+            'total_steps': self.total_steps,
+            'max_lr': self.max_lr,
+            'final_lr': self.final_lr,
+            'start_lr': self.start_lr,
+            'decay_rate': self.decay_rate,
+        }
+
+    def load_state_dict(self, state_dict: Dict[str, Any]):
+        self.current_step = state_dict.get('current_step', 0)
+        self.warmup_steps = state_dict.get('warmup_steps', self.warmup_steps)
+        self.total_steps = state_dict.get('total_steps', self.total_steps)
+        self.max_lr = state_dict.get('max_lr', self.max_lr)
+        self.final_lr = state_dict.get('final_lr', self.final_lr)
+        self.start_lr = state_dict.get('start_lr', self.start_lr)
+        self.decay_rate = state_dict.get('decay_rate', self.decay_rate)
+
+
+def create_scheduler(
+    optimizer,
+    schedule_type: str,
+    steps: int,
+    lr: float,
+    warmup_steps: Optional[int] = None,
+    start_lr: Optional[float] = None,
+    final_lr: Optional[float] = None,
+):
+    """Create a learning rate scheduler.
+
+    Args:
+        optimizer: The optimizer to schedule
+        schedule_type: One of 'cosine', 'linear', 'warmup_exp_decay'
+        steps: Total training steps
+        lr: Peak learning rate
+        warmup_steps: Warmup steps (defaults to 5% of total)
+        start_lr: Starting LR for warmup (defaults to 1e-7)
+        final_lr: Final LR for decay schedules (defaults to 1e-6)
+
+    Returns:
+        Scheduler instance
+    """
+    if warmup_steps is None:
+        warmup_steps = int(0.05 * steps)
+    if start_lr is None:
+        start_lr = 1e-7
+    if final_lr is None:
+        final_lr = 1e-6
+
+    if schedule_type == "cosine":
+        return CosineScheduler(
+            optimizer, warmup_steps=warmup_steps, total_steps=steps,
+            max_lr=lr, min_lr=final_lr, start_lr=start_lr
+        )
+    elif schedule_type == "linear":
+        return LinearScheduler(
+            optimizer, warmup_steps=warmup_steps,
+            max_lr=lr, start_lr=start_lr
+        )
+    elif schedule_type == "warmup_exp_decay":
+        return ExponentialDecayScheduler(
+            optimizer, warmup_steps=warmup_steps, total_steps=steps,
+            max_lr=lr, final_lr=final_lr, start_lr=start_lr
+        )
+    else:
+        raise ValueError(f"Unknown scheduler type: {schedule_type}")

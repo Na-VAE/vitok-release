@@ -256,10 +256,29 @@ class RandomTileSampler:
             start_y = self._sample_int(max_sy, self.n_tiles)
             start_x = self._sample_int(max_sx, self.n_tiles)
         else:  # uniform_pixel
-            pixel_y = self._sample_int(torch.clamp(orig_h - 1, min=0), self.n_tiles)
-            pixel_x = self._sample_int(torch.clamp(orig_w - 1, min=0), self.n_tiles)
-            start_y = pixel_y - self.tile_h // 2
-            start_x = pixel_x - self.tile_w // 2
+            half_h = self.tile_h // 2
+            half_w = self.tile_w // 2
+            # Prefer centers whose tiles fully fit in the original image.
+            min_center_y = torch.full_like(orig_h, half_h)
+            min_center_x = torch.full_like(orig_w, half_w)
+            max_center_y = orig_h - self.tile_h + half_h
+            max_center_x = orig_w - self.tile_w + half_w
+
+            valid_y = max_center_y >= min_center_y
+            valid_x = max_center_x >= min_center_x
+
+            range_y = torch.where(valid_y, max_center_y - min_center_y, orig_h - 1)
+            range_x = torch.where(valid_x, max_center_x - min_center_x, orig_w - 1)
+            range_y = torch.clamp(range_y, min=0)
+            range_x = torch.clamp(range_x, min=0)
+
+            offset_y = torch.where(valid_y, min_center_y, torch.zeros_like(min_center_y))
+            offset_x = torch.where(valid_x, min_center_x, torch.zeros_like(min_center_x))
+
+            pixel_y = self._sample_int(range_y, self.n_tiles) + offset_y.unsqueeze(1)
+            pixel_x = self._sample_int(range_x, self.n_tiles) + offset_x.unsqueeze(1)
+            start_y = pixel_y - half_h
+            start_x = pixel_x - half_w
 
         return start_y, start_x
 
