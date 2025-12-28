@@ -32,7 +32,7 @@ import numpy as np
 
 from vitok import AEConfig, load_ae
 from vitok import DiTConfig, load_dit
-from vitok.diffusion import UniPCScheduler, unipc_sample
+from vitok.diffusion import FlowUniPCMultistepScheduler
 from vitok.datasets.io import postprocess_images
 
 
@@ -64,6 +64,7 @@ def generate_images(
     seed: int = 42,
     device: torch.device = None,
     dtype: torch.dtype = torch.bfloat16,
+    num_classes: int = 1000,
 ):
     """Generate images from class labels."""
     if device is None:
@@ -73,6 +74,7 @@ def generate_images(
 
     # Prepare labels
     labels = torch.tensor(class_labels, device=device).repeat_interleave(num_samples)
+    labels_null = torch.full_like(labels, num_classes)  # null class for CFG
     batch_size = len(labels)
 
     # Calculate latent dimensions
@@ -88,35 +90,41 @@ def generate_images(
     print(f"  Steps: {num_steps}")
 
     # Initialize noise
-    z = torch.randn(batch_size, num_tokens, code_width, device=device, dtype=torch.float32)
+    latents = torch.randn(batch_size, num_tokens, code_width, device=device, dtype=torch.float32)
 
-    # Create scheduler
-    scheduler = UniPCScheduler(
-        num_train_timesteps=1000,
-        beta_schedule="scaled_linear",
-        prediction_type="epsilon",
-        solver_order=3,
-    )
+    # Create scheduler (flow matching with velocity prediction)
+    scheduler = FlowUniPCMultistepScheduler(thresholding=False)
+    scheduler.set_timesteps(num_steps)
 
-    # Create model wrapper for UniPC
-    def model_fn(x, t, cond=None):
-        """Wrapper to convert DiT interface to UniPC interface."""
-        with torch.autocast(device_type='cuda', dtype=dtype):
-            return dit({"z": x, "t": t, "context": cond})
+    def autocast_ctx():
+        return torch.autocast(device_type='cuda', dtype=dtype)
 
     # Sample
     with torch.no_grad():
-        z_denoised = unipc_sample(
-            model_fn,
-            scheduler,
-            z,
-            num_steps=num_steps,
-            order=3,
-            guidance_scale=cfg_scale,
-            cond=labels,
-            uncond=torch.full_like(labels, 1000),  # null class
-            device=device,
-        )
+        # Sampling loop
+        for i, t in enumerate(scheduler.timesteps):
+            t_batch = t.expand(batch_size)
+
+            # Check if CFG should be applied
+            use_cfg = cfg_scale != 1.0
+
+            if use_cfg:
+                # Batched CFG
+                x_in = torch.cat([latents, latents], dim=0)
+                t_in = torch.cat([t_batch, t_batch], dim=0)
+                y_in = torch.cat([labels_null, labels], dim=0)
+
+                with autocast_ctx():
+                    out = dit({"z": x_in, "t": t_in, "context": y_in})
+
+                uncond, cond = out.chunk(2, dim=0)
+                v_pred = uncond + cfg_scale * (cond - uncond)
+            else:
+                with autocast_ctx():
+                    v_pred = dit({"z": latents, "t": t_batch, "context": labels})
+
+            # UniPC step
+            latents = scheduler.step(v_pred.float(), t, latents, return_dict=False)[0]
 
         # Create decode dict
         y, x = torch.meshgrid(
@@ -126,7 +134,7 @@ def generate_images(
         )
 
         decode_dict = {
-            'z': z_denoised.to(dtype),
+            'z': latents.to(dtype),
             'ptype': torch.ones(batch_size, num_tokens, dtype=torch.bool, device=device),
             'yidx': y.flatten().unsqueeze(0).expand(batch_size, -1),
             'xidx': x.flatten().unsqueeze(0).expand(batch_size, -1),
@@ -221,6 +229,7 @@ def main():
         seed=args.seed,
         device=device,
         dtype=dtype,
+        num_classes=args.num_classes,
     )
 
     # Save
