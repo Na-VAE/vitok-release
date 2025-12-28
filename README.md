@@ -179,11 +179,11 @@ If you find this code or work helpful, please cite:
 This implementation builds upon ideas from the original ViTok work:
 
 ```bibtex
-@article{yu2024image,
-  title={An Image is Worth 32 Tokens for Reconstruction and Generation},
-  author={Yu, Qihang and Hauber, Mark and Odena, Augustus and Xiong, Yuanzhong and Yang, Hanxiao and Maddison, Chris and Han, Wei and Liu, Yongchao and Hu, Han and Zhou, Hong-Jiang and others},
-  journal={arXiv preprint arXiv:2406.07550},
-  year={2024}
+@article{hansenestruch2025vitok,
+  title={Learnings from Scaling Visual Tokenizers for Reconstruction and Generation},
+  author={Hansen-Estruch, Philippe and Yan, David and Chung, Ching-Yao and Zohar, Orr and Wang, Jialiang and Hou, Tingbo and Xu, Tao and Vishwanath, Sriram and Vajda, Peter and Chen, Xinlei},
+  journal={arXiv preprint arXiv:2501.09755},
+  year={2025}
 }
 ```
 
