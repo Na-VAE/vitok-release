@@ -9,14 +9,12 @@ from vitok.models.modules.mlp import SwiGLU
 from vitok.models.modules.layerscale import LayerScale
 from vitok.models.modules.attention import Attention, create_2d_block_mask
 from vitok.models.modules.norm import RMSNorm, LayerNorm
-from vitok.models.modules.rotary_embedding import compute_2d_freqs_cis, compute_inv_freq
-from vitok.models.distributions import DiagonalGaussianDistribution
+from vitok.models.modules.rotary_embedding import compute_2d_freqs_cis
 
 try:
     from torchao.float8 import convert_to_float8_training
 except ImportError:
     convert_to_float8_training = None
-
 
 def _make_score_mod(attn_mask: torch.Tensor, num_special: int = 0):
     """Create score_mod from attention mask, handling special tokens inline."""
@@ -29,9 +27,7 @@ def _make_score_mod(attn_mask: torch.Tensor, num_special: int = 0):
         valid_patch = attn_mask[b, patch_q, patch_kv]
         valid = is_special | valid_patch
         return torch.where(valid, score, torch.full_like(score, float('-inf')))
-
     return score_mod
-
 
 def drop_path(
     x: torch.Tensor,
@@ -50,19 +46,6 @@ def drop_path(
         x = x.div(keep_prob)
     return x * random_tensor
 
-
-class DropPath(nn.Module):
-    """Stochastic depth module."""
-
-    def __init__(self, drop_prob: float = 0.0, scale_by_keep: bool = True) -> None:
-        super().__init__()
-        self.drop_prob = float(drop_prob)
-        self.scale_by_keep = bool(scale_by_keep)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return drop_path(x, self.drop_prob, self.training, self.scale_by_keep)
-
-
 class Block(nn.Module):
     """Transformer block with parallel attention + MLP and LayerScale."""
 
@@ -72,9 +55,6 @@ class Block(nn.Module):
         ffn_dim: int,
         num_heads: int,
         num_special_tokens: int = 0,
-        qk_norm: str = "rmsnorm",
-        norm_type: str = "rmsnorm",
-        parallel_mlp_attn: bool = True,
         use_layer_scale: bool = True,
         layer_scale_init: float = 1e-6,
         drop_path: float = 0.0,
@@ -90,11 +70,10 @@ class Block(nn.Module):
             dim=dim,
             num_heads=num_heads,
             num_special_tokens=num_special_tokens,
-            qk_norm=qk_norm,
         )
         self.ffn = SwiGLU(dim, hidden_dim=ffn_dim)
         self.layer_scale = LayerScale(dim, layer_scale_init) if use_layer_scale else nn.Identity()
-        self.drop_path = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
+        self.drop_path_rate = drop_path
 
     def forward(
         self,
@@ -107,13 +86,12 @@ class Block(nn.Module):
         attn_out = self.attn(
             h,
             freqs_cis=freqs_cis,
-            sliding_window=self.sliding_window,
             score_mod=score_mod,
             block_mask=block_mask,
         )
         mlp_out = self.ffn(h)
         combined = self.layer_scale(attn_out + mlp_out)
-        return x + self.drop_path(combined)
+        return x + drop_path(combined, self.drop_path_rate, self.training)
 
 
 class AE(nn.Module):
@@ -131,6 +109,8 @@ class AE(nn.Module):
         decoder_heads=12,
         mlp_factor=2.67,
         variational=False,
+        encoder_output_fn = 'layernorm',
+        decoder_output_fn = 'none',
         checkpoint: int = 0,
         spatial_stride: int = 16,
         temporal_stride: int = 1,
@@ -138,7 +118,7 @@ class AE(nn.Module):
         reg_tokens: int = 0,
         use_layer_scale: bool = True,
         layer_scale_init: float = 1e-4,
-        drop_path_rate: float = 0.2,
+        drop_path_rate: float = 0.0,
         float8: bool = False,
         encoder: bool = True,
         decoder: bool = True,
@@ -155,8 +135,8 @@ class AE(nn.Module):
         norm_type = 'rmsnorm'
         qk_norm = 'rmsnorm'
         rope_theta = 10000.0
-        encoder_output_fn = 'layernorm'
-        decoder_output_fn = 'none'
+        self.encoder_output_fn = encoder_output_fn
+        self.decoder_output_fn = decoder_output_fn
         parallel_mlp_attn = True
         sw_every = 1
 
@@ -210,9 +190,6 @@ class AE(nn.Module):
                     ffn_dim=int(encoder_width * mlp_factor),
                     num_heads=encoder_heads,
                     num_special_tokens=self.num_special_tokens,
-                    norm_type=norm_type,
-                    qk_norm=qk_norm,
-                    parallel_mlp_attn=parallel_mlp_attn,
                     use_layer_scale=use_layer_scale,
                     layer_scale_init=layer_scale_init,
                     drop_path=0.0,
@@ -226,13 +203,6 @@ class AE(nn.Module):
             self.encoder_blocks = nn.ModuleList(blocks)
 
             self.output_fn = LayerNorm(channels_per_token)
-        else:
-            self.cls_token = None
-            self.reg_token = None
-            self.patch_embed = None
-            self.to_code = None
-            self.encoder_blocks = None
-            self.output_fn = None
 
         # Initialize decoder components
         if decoder:
@@ -255,9 +225,6 @@ class AE(nn.Module):
                     ffn_dim=int(decoder_width * mlp_factor),
                     num_heads=decoder_heads,
                     num_special_tokens=self.num_special_tokens,
-                    norm_type=norm_type,
-                    qk_norm=qk_norm,
-                    parallel_mlp_attn=parallel_mlp_attn,
                     use_layer_scale=use_layer_scale,
                     layer_scale_init=layer_scale_init,
                     drop_path=decoder_dpr[layer_idx],
@@ -269,12 +236,6 @@ class AE(nn.Module):
                     convert_to_float8_training(block)
                 blocks.append(block)
             self.decoder_blocks = nn.ModuleList(blocks)
-        else:
-            self.decoder_cls_token = None
-            self.decoder_reg_token = None
-            self.decoder_embed = None
-            self.to_pixels = None
-            self.decoder_blocks = None
 
         if self.sw is not None and self.train_seq_len is not None:
             self._block_mask = create_2d_block_mask(
@@ -296,13 +257,7 @@ class AE(nn.Module):
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         yidx = patch_dict['yidx'].to(device=device, dtype=torch.float32)
         xidx = patch_dict['xidx'].to(device=device, dtype=torch.float32)
-        if yidx.ndim == 1:
-            yidx = yidx.unsqueeze(0).expand(batch_size, -1)
-            xidx = xidx.unsqueeze(0).expand(batch_size, -1)
-
-        inv_freq = compute_inv_freq(head_dim // 2, self.rope_theta, device)
-        freqs_cos, freqs_sin = compute_2d_freqs_cis(yidx, xidx, head_dim, self.rope_theta, inv_freq)
-
+        freqs_cos, freqs_sin = compute_2d_freqs_cis(yidx, xidx, head_dim, self.rope_theta)
         S = self.num_special_tokens
         if S > 0:
             rope_dim = freqs_cos.shape[-1]
@@ -310,7 +265,6 @@ class AE(nn.Module):
             zeros = torch.zeros_like(ones)
             freqs_cos = torch.cat([ones, freqs_cos], dim=1)
             freqs_sin = torch.cat([zeros, freqs_sin], dim=1)
-
         return freqs_cos.float(), freqs_sin.float()
 
     def encode(self, patch_dict: Dict[str, torch.Tensor]):
@@ -350,29 +304,24 @@ class AE(nn.Module):
         if self.num_special_tokens > 0:
             x = x[:, self.num_special_tokens:]
 
-        code = self.to_code(x)
-        if not self.variational:
-            code = self.output_fn(code)
-        else:
-            mean, logvar = torch.chunk(code, 2, dim=-1)
-            mean = self.output_fn(mean)
-            code = torch.cat([mean, logvar], dim=-1)
-
-        posterior = DiagonalGaussianDistribution(code, deterministic=(not self.variational), dim=2)
-        posterior_dict = {
+        z = self.to_code(x)
+        encode_dict = {
             k: v for k, v in patch_dict.items()
             if k != 'patches'
         }
-        posterior_dict['posterior'] = posterior
-        return posterior_dict
+        encode_dict['z'] = z
+        return encode_dict
 
-    def decode(self, posterior_dict: Dict[str, torch.Tensor], max_grid_size=None):
+    def decode(self, encode_dict: Dict[str, torch.Tensor], max_grid_size=None):
         """Decode latent codes to patches."""
         if not self.decoder:
             raise RuntimeError("Cannot call decode() on an encoder-only model")
+        
+        assert 'original_height' in encode_dict and 'original_width' in encode_dict, \
+            "AE.decode expects 'original_height' and 'original_width' in posterior_dict"
 
-        x = self.decoder_embed(posterior_dict['z'])
-        B, patch_len, _ = x.shape
+        x = self.decoder_embed(encode_dict['z'])
+        B, _, _ = x.shape
 
         if self.decoder_cls_token is not None or self.decoder_reg_token is not None:
             tokens = []
@@ -384,13 +333,13 @@ class AE(nn.Module):
             x = torch.cat(tokens, dim=1)
 
         freqs_cis = self._get_rope_freqs(
-            posterior_dict,
+            encode_dict,
             head_dim=self.decoder_width // self.decoder_heads,
             device=x.device, batch_size=B,
         )
 
         score_mod = None
-        attn_mask = posterior_dict.get('attention_mask')
+        attn_mask = encode_dict.get('attention_mask')
         if attn_mask is not None:
             score_mod = _make_score_mod(attn_mask, self.num_special_tokens)
 
@@ -404,39 +353,18 @@ class AE(nn.Module):
             x = x[:, self.num_special_tokens:]
 
         pred_patches = self.to_pixels(x)
+        decode_dict = encode_dict
+        del decode_dict['z']
+        decode_dict['patches'] = pred_patches
+        return decode_dict
 
-        assert 'original_height' in posterior_dict and 'original_width' in posterior_dict, \
-            "AE.decode expects 'original_height' and 'original_width' in posterior_dict"
-        return {
-            'patches': pred_patches,
-            'ptype': posterior_dict['ptype'],
-            'yidx': posterior_dict['yidx'],
-            'xidx': posterior_dict['xidx'],
-            'original_height': posterior_dict['original_height'],
-            'original_width': posterior_dict['original_width'],
-        }
-
-    def forward(self, patch_dict: Dict[str, torch.Tensor], max_grid_size=None, sample_posterior=True):
+    def forward(self, x: Dict[str, torch.Tensor]):
         """Full forward pass: encode, sample, decode."""
-        if self.encoder and not self.decoder:
-            return self.encode(patch_dict)
-        elif self.decoder and not self.encoder:
-            if 'z' not in patch_dict:
-                raise ValueError("decoder-only mode requires 'z' in patch_dict")
-            decode_result = self.decode(patch_dict, max_grid_size=max_grid_size)
-            patch_dict.update(decode_result)
-            return patch_dict
-
-        posterior_dict = self.encode(patch_dict)
-        posterior = posterior_dict['posterior']
-        if sample_posterior and self.variational:
-            z = posterior.mean + posterior.std * torch.randn_like(posterior.mean)
-        else:
-            z = posterior.mean
-        posterior_dict['z'] = z
-        decode_result = self.decode(posterior_dict, max_grid_size=max_grid_size)
-        posterior_dict.update(decode_result)
-        return posterior_dict
+        if self.encoder:
+            x = self.encode(x)
+        elif self.decoder:
+            x = self.decode(x)
+        return x
 
     def get_encoder_decoder_param_groups(self) -> Tuple[List[nn.Parameter], List[nn.Parameter], List[nn.Parameter], List[nn.Parameter]]:
         """Return (enc_decay, enc_no_decay, dec_decay, dec_no_decay) parameter groups."""
@@ -497,15 +425,6 @@ class AE(nn.Module):
                 dec_no.append(param)
 
         return enc_decay, enc_no, dec_decay, dec_no
-
-    def fsdp_unit_modules(self):
-        """Return modules to shard individually for FSDP2."""
-        units = []
-        if self.encoder_blocks is not None:
-            units.extend(list(self.encoder_blocks))
-        if self.decoder_blocks is not None:
-            units.extend(list(self.decoder_blocks))
-        return units
 
 
 def Model(**kw):

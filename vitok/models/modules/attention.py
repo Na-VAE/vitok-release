@@ -72,8 +72,6 @@ class Attention(nn.Module):
         num_heads: int,
         num_special_tokens: int = 0,
         fused: bool = True,
-        qk_norm: str = "rmsnorm",
-        eps: float = 1e-6,
     ):
         super().__init__()
         self.dim = dim
@@ -82,15 +80,8 @@ class Attention(nn.Module):
         self.num_special_tokens = num_special_tokens
         self.fused = fused
 
-        if qk_norm == "rmsnorm":
-            self.norm_q = RMSNorm(self.head_dim, eps=eps)
-            self.norm_k = RMSNorm(self.head_dim, eps=eps)
-        elif qk_norm == "layernorm":
-            self.norm_q = LayerNorm(self.head_dim, eps=eps)
-            self.norm_k = LayerNorm(self.head_dim, eps=eps)
-        else:
-            self.norm_q = nn.Identity()
-            self.norm_k = nn.Identity()
+        self.norm_q = RMSNorm(self.head_dim)
+        self.norm_k = RMSNorm(self.head_dim)
 
         if self.fused:
             self.qkv_proj = nn.Linear(self.dim, 3 * self.dim, bias=False)
@@ -100,27 +91,11 @@ class Attention(nn.Module):
             self.v = nn.Linear(self.dim, self.dim, bias=False)
 
         self.out_proj = nn.Linear(self.dim, self.dim, bias=False)
-        self._block_mask_cache: Dict[Tuple, object] = {}
-
-    def _get_block_mask(self, window: int, seq_len: int, device: torch.device):
-        """Get cached block mask for sliding window attention."""
-        S = self.num_special_tokens
-        key = (window, seq_len, S, str(device))
-
-        if key not in self._block_mask_cache:
-            self._block_mask_cache[key] = create_2d_block_mask(
-                window=window,
-                seq_len=seq_len,
-                num_special=S,
-                device=device,
-            )
-        return self._block_mask_cache[key]
 
     def forward(
         self,
         hidden_states: torch.Tensor,
-        freqs_cis: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
-        sliding_window: Optional[int] = None,
+        freqs_cis: Tuple[torch.Tensor, torch.Tensor],
         score_mod=None,
         block_mask=None,
     ):
@@ -144,50 +119,21 @@ class Attention(nn.Module):
             v = self.v(hidden_states).reshape(B, N, self.num_heads, self.head_dim).transpose(1, 2)
 
         q, k = self.norm_q(q), self.norm_k(k)
-
-        if freqs_cis is not None:
-            q, k = apply_rotary_emb(q, k, freqs_cis[0], freqs_cis[1])
-
-        if sliding_window is not None and sliding_window >= 0:
-            if block_mask is None:
-                block_mask = self._get_block_mask(sliding_window, N, q.device)
-            attn = flex_attention(q, k, v, block_mask=block_mask, score_mod=score_mod)
-        else:
-            attn = flex_attention(q, k, v, score_mod=score_mod)
-
+        q, k = apply_rotary_emb(q, k, freqs_cis[0], freqs_cis[1])
+        attn = flex_attention(q, k, v, block_mask=block_mask, score_mod=score_mod)
         attn = attn.transpose(1, 2).reshape(B, N, C)
         return self.out_proj(attn)
 
 
-class CrossAttention(nn.Module):
+class CrossAttention(Attention):
     """Cross attention for conditioning."""
 
     def __init__(
         self,
         dim: int,
         num_heads: int,
-        qk_norm: str = "rmsnorm",
-        eps: float = 1e-6,
     ):
-        super().__init__()
-        self.dim = dim
-        self.num_heads = num_heads
-        self.head_dim = dim // num_heads
-
-        if qk_norm == "rmsnorm":
-            self.norm_q = RMSNorm(self.head_dim, eps=eps)
-            self.norm_k = RMSNorm(self.head_dim, eps=eps)
-        elif qk_norm == "layernorm":
-            self.norm_q = LayerNorm(self.head_dim, eps=eps)
-            self.norm_k = LayerNorm(self.head_dim, eps=eps)
-        else:
-            self.norm_q = nn.Identity()
-            self.norm_k = nn.Identity()
-
-        self.q = nn.Linear(self.dim, self.dim, bias=False)
-        self.k = nn.Linear(self.dim, self.dim, bias=False)
-        self.v = nn.Linear(self.dim, self.dim, bias=False)
-        self.out_proj = nn.Linear(self.dim, self.dim, bias=False)
+        super().__init__(dim=dim, num_heads=num_heads, fused=False)
 
     def forward(self, x: torch.Tensor, context: torch.Tensor):
         """
@@ -195,14 +141,11 @@ class CrossAttention(nn.Module):
             x: [B, L1, C] queries
             context: [B, L2, C] keys/values
         """
-        B = x.size(0)
-
+        B = x.shape[0]
         q = self.q(x).reshape(B, -1, self.num_heads, self.head_dim).transpose(1, 2)
         k = self.k(context).reshape(B, -1, self.num_heads, self.head_dim).transpose(1, 2)
         v = self.v(context).reshape(B, -1, self.num_heads, self.head_dim).transpose(1, 2)
-
         q, k = self.norm_q(q), self.norm_k(k)
-
         attn = flex_attention(q, k, v)
         attn = attn.transpose(1, 2).flatten(2)
         return self.out_proj(attn)
