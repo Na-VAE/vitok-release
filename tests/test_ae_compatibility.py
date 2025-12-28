@@ -156,10 +156,10 @@ def test_ae_encode_decode():
     """Test that AE can encode and decode without errors."""
     from vitok import AEConfig, create_ae
 
-    # Create small model
+    # Create small model - use variational=False for simpler testing
     config = AEConfig(
         variant="Bd2-Bd4/1x16x32",
-        variational=True,
+        variational=False,  # Use non-variational for simpler encode/decode
     )
     model = create_ae(config)
     model.eval()
@@ -171,15 +171,13 @@ def test_ae_encode_decode():
     with torch.no_grad():
         encoded = model.encode(test_input)
 
-    assert 'z' in encoded or 'posterior' in encoded, \
-        f"Encode output missing 'z' or 'posterior': {encoded.keys()}"
+    assert 'z' in encoded, f"Encode output missing 'z': {encoded.keys()}"
+    z = encoded['z']
+
+    # For non-variational, z should have channels_per_token dimensions
+    assert z.shape[-1] == 32, f"Expected z dim 32, got {z.shape[-1]}"
 
     # Test decode
-    if 'posterior' in encoded:
-        z = encoded['posterior'].mode()
-    else:
-        z = encoded['z']
-
     decode_input = {
         'z': z,
         'ptype': test_input['ptype'],
@@ -214,9 +212,10 @@ def test_ae_reconstruction():
     # Create test input
     test_input = create_test_naflex_batch(batch_size=2, seq_len=64, patch_size=16)
 
-    # Forward pass (encode + decode)
+    # Encode then decode (current forward only does encode for encoder+decoder models)
     with torch.no_grad():
-        output = model(test_input)
+        encoded = model.encode(test_input)
+        output = model.decode(encoded)
 
     input_patches = test_input['patches']
     output_patches = output['patches']

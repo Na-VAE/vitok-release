@@ -176,6 +176,8 @@ with wds.TarWriter("shard-00000.tar") as sink:
 
 ## Testing
 
+### Local Tests (CPU)
+
 ```bash
 # Run all tests
 pytest tests/ -v
@@ -185,32 +187,80 @@ pytest tests/test_data_stream.py -v
 
 # Test AE compatibility (requires vitokv2)
 pytest tests/test_ae_compatibility.py -v
+
+# Test preprocessing pipeline
+pytest tests/test_pp.py -v
+
+# Test UniPC scheduler
+pytest tests/test_unipc.py -v
 ```
+
+### GPU Tests on Modal
+
+For GPU testing, we use [Modal](https://modal.com/) which provides serverless GPUs.
+
+**Setup:**
+
+1. Install Modal: `pip install modal`
+2. Authenticate: `modal token new`
+3. Run tests:
+
+```bash
+# Quick tests (forward passes only)
+modal run modal/test_all.py --quick
+
+# Full test suite on GPU
+modal run modal/test_all.py
+
+# Include vitokv2 compatibility tests (requires ../vitokv2)
+modal run modal/test_all.py --compat
+
+# Individual test files
+modal run modal/test_ae_gpu.py
+modal run modal/test_dit_gpu.py
+```
+
+The Modal tests verify:
+- AE/DiT forward pass works on GPU
+- torch.compile compatibility
+- Weight compatibility with vitokv2
+- UniPC sampling loop
+- Full pytest suite on GPU
 
 ## Project Structure
 
 ```
-vitok/
+vitok-release/
 ├── vitok/
 │   ├── __init__.py           # Public API
 │   ├── ae.py                  # AEConfig + create_ae/load_ae
 │   ├── dit.py                 # DiTConfig + create_dit/load_dit
-│   ├── naflex.py              # NaFlex transform config
-│   ├── data.py                # Streaming dataloader config
+│   ├── naflex_io.py           # Image preprocessing/postprocessing
+│   ├── data.py                # Streaming dataloader
 │   ├── models/                # Core model implementations
-│   ├── transforms/            # Image transforms and patching
-│   ├── datasets/              # Data loading utilities
-│   ├── diffusion/             # Flow matching scheduler
+│   │   ├── ae.py              # Autoencoder
+│   │   ├── dit.py             # Diffusion Transformer
+│   │   └── modules/           # Attention, MLP, RoPE, etc.
+│   ├── pp/                    # Preprocessing pipeline DSL
+│   ├── diffusion/             # UniPC scheduler
 │   └── configs/               # Variant parser
-├── scripts/
-│   ├── train_dit.py           # DiT training
-│   ├── sample_dit.py          # DiT sampling
-│   └── install_eval_datasets.sh
 ├── examples/
 │   ├── encode_decode.py
 │   ├── dit_generation.py
+│   ├── train_vae.py
+│   ├── train_dit.py
 │   └── configs/
 ├── tests/
+│   ├── test_ae_compatibility.py
+│   ├── test_dit.py
+│   ├── test_pp.py
+│   ├── test_unipc.py
+│   └── test_data_stream.py
+├── modal/                     # Modal GPU testing
+│   ├── env.py                 # Modal environment config
+│   ├── test_all.py            # Combined test runner
+│   ├── test_ae_gpu.py         # AE GPU tests
+│   └── test_dit_gpu.py        # DiT GPU tests
 └── pyproject.toml
 ```
 
