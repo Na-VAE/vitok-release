@@ -1,27 +1,54 @@
 """Rotary Position Embeddings (RoPE) for 1D and 2D sequences."""
 
 import torch
-from typing import Tuple
+from typing import Optional, Tuple
+
+
+def compute_inv_freq(dim: int, theta: float, device: torch.device) -> torch.Tensor:
+    """Precompute inverse frequencies for a given rotary dimension."""
+    if dim % 2 != 0:
+        raise ValueError(f"RoPE axis dimension must be even, got dim={dim}")
+
+    with torch.amp.autocast(enabled=False, device_type="cuda"):
+        return 1.0 / (theta ** (torch.arange(0, dim, 2, device=device).float() / dim))
+
 
 def _compute_axis_freqs(
     positions: torch.Tensor,
     dim: int,
     theta: float,
+    inv_freq: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Compute cosine/sine pairs for a single RoPE axis."""
-    device = positions.device
-    with torch.amp.autocast(enabled=False, device_type=device.type if device.type != 'cpu' else 'cuda'):
-        inv_freq = 1.0 / (theta ** (torch.arange(0, dim, 2, device=device).float() / dim))
+    if inv_freq is None:
+        inv_freq = compute_inv_freq(dim, theta, positions.device)
+    else:
+        inv_freq = inv_freq.to(device=positions.device)
+
+    with torch.amp.autocast(enabled=False, device_type="cuda"):
         freqs = positions.to(torch.float32)[..., None] * inv_freq
         freqs_cos = torch.cos(freqs)
         freqs_sin = torch.sin(freqs)
     return freqs_cos, freqs_sin
+
+
+def compute_freqs_cis(
+    t: torch.Tensor,
+    dim: int = 768,
+    theta: float = 10000.0,
+    inv_freq: Optional[torch.Tensor] = None,
+):
+    """1D rotary frequencies for sequence indices ``t``."""
+    freqs_cos, freqs_sin = _compute_axis_freqs(t, dim, theta, inv_freq=inv_freq)
+    return freqs_cos, freqs_sin
+
 
 def compute_2d_freqs_cis(
     y_positions: torch.Tensor,
     x_positions: torch.Tensor,
     dim: int,
     theta: float = 10000.0,
+    axis_inv_freq: Optional[torch.Tensor] = None,
 ):
     """2D rotary frequencies for spatial coordinates."""
     if y_positions.shape != x_positions.shape:
@@ -30,12 +57,23 @@ def compute_2d_freqs_cis(
         raise ValueError("2D RoPE requires head dimension divisible by 4")
 
     axis_dim = dim // 2
-    cos_y, sin_y = _compute_axis_freqs(y_positions, axis_dim, theta)
-    cos_x, sin_x = _compute_axis_freqs(x_positions, axis_dim, theta)
+    cos_y, sin_y = _compute_axis_freqs(
+        y_positions,
+        axis_dim,
+        theta,
+        inv_freq=axis_inv_freq,
+    )
+    cos_x, sin_x = _compute_axis_freqs(
+        x_positions,
+        axis_dim,
+        theta,
+        inv_freq=axis_inv_freq,
+    )
 
     freqs_cos = torch.cat((cos_y, cos_x), dim=-1)
     freqs_sin = torch.cat((sin_y, sin_x), dim=-1)
     return freqs_cos, freqs_sin
+
 
 def reshape_for_broadcast(freqs_cis: torch.Tensor, x: torch.Tensor):
     """Reshape frequency tensor for broadcasting with input."""
@@ -52,6 +90,7 @@ def reshape_for_broadcast(freqs_cis: torch.Tensor, x: torch.Tensor):
             "freqs_cis shape must match either sequence, head, or batch dimensions"
         )
     return freqs_cis.view(*shape)
+
 
 def apply_rotary_emb(
     xq: torch.Tensor,

@@ -149,6 +149,7 @@ class DiT(nn.Module):
         self.reg_tokens = reg_tokens
         self.num_special_tokens = (1 if class_token else 0) + reg_tokens
         self.train_seq_len = train_seq_len
+        self.freq_dim = freq_dim
 
         self._inv_freq_cache: dict = {}
         self._block_mask = None
