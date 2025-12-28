@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""DiT training script with flow matching.
+"""DiT training script with flow matching and UniPC sampling.
 
 Example usage:
     # Single GPU
@@ -30,8 +30,8 @@ from torch.distributed._composable.fsdp import fully_shard, MixedPrecisionPolicy
 from vitok import AEConfig, create_ae, load_ae
 from vitok import DiTConfig, create_dit, load_dit
 from vitok import StreamingWebDatasetConfig, create_streaming_dataloader
-from vitok.diffusion import FlowMatchingScheduler
-from vitok import postprocess_images
+from vitok.diffusion import FlowUniPCMultistepScheduler
+from vitok.datasets.io import postprocess_images
 from vitok.utils.weights import load_weights
 
 
@@ -305,8 +305,10 @@ def main():
             if 'scheduler' in state:
                 lr_scheduler.load_state_dict(state['scheduler'])
 
-    # Scheduler for flow matching
-    flow_scheduler = FlowMatchingScheduler(num_train_timesteps=1000)
+    # Scheduler for training and sampling (flow matching with velocity prediction)
+    diffusion_scheduler = FlowUniPCMultistepScheduler(thresholding=False)
+    diffusion_scheduler.set_timesteps(1000, device=device)
+    eval_scheduler = FlowUniPCMultistepScheduler(thresholding=False)
 
     # Dataloader
     if config.hf_repo:
@@ -394,10 +396,10 @@ def main():
         dropout_mask = torch.rand(labels.shape[0], device=device) < config.cfg_dropout
         context[dropout_mask] = config.num_classes  # Null class
 
-        # Sample timesteps and add noise
+        # Sample timesteps and add noise (flow matching)
         noise = torch.randn_like(z)
         t_idx = torch.randint(0, 1000, (z.shape[0],), device=device)
-        noisy_z = flow_scheduler.add_noise(z, noise, t_idx)
+        noisy_z = diffusion_scheduler.add_noise(z, noise, t_idx)
 
         # Forward pass
         optimizer.zero_grad(set_to_none=True)
@@ -412,8 +414,8 @@ def main():
             })
 
         # Flow matching loss: predict velocity v = noise - z
-        target = flow_scheduler.get_velocity_target(z, noise)
-        loss = (v_pred.float() - target).pow(2).mean()
+        velocity_target = noise - z
+        loss = (v_pred.float() - velocity_target).pow(2).mean()
 
         # Backward
         loss.backward()
@@ -471,23 +473,30 @@ def main():
             with torch.no_grad():
                 # Generate samples
                 sample_labels = torch.arange(min(16, config.num_classes), device=device)
-                sample_z = torch.randn(len(sample_labels), z.shape[1], z.shape[2], device=device)
+                sample_labels_null = torch.full_like(sample_labels, config.num_classes)
+                latents = torch.randn(len(sample_labels), z.shape[1], z.shape[2], device=device)
 
-                from vitok.diffusion.flow_matching import euler_sample
-                samples_z = euler_sample(
-                    ema,
-                    flow_scheduler,
-                    sample_z,
-                    sample_labels,
-                    num_steps=50,
-                    cfg_scale=4.0,
-                    device=device,
-                    autocast_ctx=autocast_ctx,
-                )
+                # Sampling with UniPC
+                eval_scheduler.set_timesteps(50)
+                for i, t in enumerate(eval_scheduler.timesteps):
+                    t_batch = t.expand(latents.shape[0])
+
+                    # CFG
+                    x_in = torch.cat([latents, latents], dim=0)
+                    t_in = torch.cat([t_batch, t_batch], dim=0)
+                    y_in = torch.cat([sample_labels_null, sample_labels], dim=0)
+
+                    with autocast_ctx():
+                        out = ema({"z": x_in, "t": t_in, "context": y_in})
+
+                    uncond, cond = out.chunk(2, dim=0)
+                    v_pred = uncond + 4.0 * (cond - uncond)
+
+                    latents = eval_scheduler.step(v_pred.float(), t, latents, return_dict=False)[0]
 
                 # Decode with AE
                 # Create minimal patch dict for decoding
-                L = samples_z.shape[1]
+                L = latents.shape[1]
                 side = int(L ** 0.5)
                 y, x = torch.meshgrid(
                     torch.arange(side, device=device),
@@ -495,7 +504,7 @@ def main():
                     indexing='ij'
                 )
                 decode_dict = {
-                    'z': samples_z.to(dtype),
+                    'z': latents.to(dtype),
                     'ptype': torch.ones(len(sample_labels), L, dtype=torch.bool, device=device),
                     'yidx': y.flatten().unsqueeze(0).expand(len(sample_labels), -1),
                     'xidx': x.flatten().unsqueeze(0).expand(len(sample_labels), -1),
