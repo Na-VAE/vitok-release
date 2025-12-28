@@ -1,8 +1,10 @@
-# ViTok
+# ViTok-v2
 
-**ViTok** (Vision Transformer Tokenizer) is a ViT-based image tokenizer designed for generative models. It features native aspect-ratio support via NaFlex patchification, enabling deployment at arbitrary resolutions while maintaining the scaling advantages of Vision Transformer architectures.
+**ViTok-v2** (Vision Transformer Tokenizer v2) is a ViT-based image tokenizer designed for generative models. It features native aspect-ratio support via NaFlex patchification, enabling deployment at arbitrary resolutions while maintaining the scaling advantages of Vision Transformer architectures.
 
 > **Note**: This is an independent public reimplementation by Philippe Hansen-Estruch and is not affiliated with Meta. The original research was conducted at Meta using a separate internal codebase.
+
+> **Coming Soon**: ArXiv paper and pretrained model weights.
 
 ## Key Features
 
@@ -153,38 +155,45 @@ vitok/
 └── modal/                    # GPU testing infrastructure
 ```
 
-## Original Research Authors
-
-The original ViTok research was conducted by:
-
-- Philippe Hansen-Estruch (UT Austin)
-- Jiahui Chen (UT Austin)
-- Vivek Ramanujan (University of Washington)
-- Orr Zohar (Stanford University)
-- Yan Ping (Spellbrush)
-- Animesh Sinha
-- Markos Georgopoulos
-- Edgar Schoenfeld
-- Ji Hou
-- Felix Juefei-Xu
-- Sriram Vishwanath (Georgia Tech)
-- Ali Thabet
-
 ## License
 
 MIT License
 
 ## Citation
 
+If you find this code or work helpful, please cite:
+
+### ViTok-v2 (this work)
+
 ```bibtex
-@article{hansenestruch2025vitok,
-  title={ViTok: A Vision Transformer Tokenizer for Generative Models},
+@article{hansenestruch2025vitokv2,
+  title={ViTok-v2: A Vision Transformer Tokenizer for Generative Models},
   author={Hansen-Estruch, Philippe and Chen, Jiahui and Ramanujan, Vivek and Zohar, Orr and Ping, Yan and Sinha, Animesh and Georgopoulos, Markos and Schoenfeld, Edgar and Hou, Ji and Juefei-Xu, Felix and Vishwanath, Sriram and Thabet, Ali},
   year={2025},
   url={https://github.com/Na-VAE/vitok-release}
 }
 ```
 
+### ViTok-v1
+
+This implementation builds upon ideas from the original ViTok work:
+
+```bibtex
+@article{yu2024image,
+  title={An Image is Worth 32 Tokens for Reconstruction and Generation},
+  author={Yu, Qihang and Hauber, Mark and Odena, Augustus and Xiong, Yuanzhong and Yang, Hanxiao and Maddison, Chris and Han, Wei and Liu, Yongchao and Hu, Han and Zhou, Hong-Jiang and others},
+  journal={arXiv preprint arXiv:2406.07550},
+  year={2024}
+}
+```
+
+## Acknowledgments
+
+This is a PyTorch reimplementation designed for simplicity and flexibility, supporting single GPU, single node, and multi-node training environments. The codebase is based on a refactor of:
+
+- [ViTok](https://github.com/google-research/big_vision) (JAX, part of big_vision)
+- [big_vision](https://github.com/google-research/big_vision) by Google Research
+
 ## Disclaimer
 
-This repository is an independent public reimplementation of the ViTok architecture by Philippe Hansen-Estruch. It is not affiliated with, endorsed by, or connected to Meta in any way. The original research was conducted at Meta using a separate internal codebase that is not publicly available.
+This repository is an independent public reimplementation of the ViTok-v2 architecture by Philippe Hansen-Estruch. It is not affiliated with, endorsed by, or connected to Meta or Google in any way. The original ViTok-v2 research was conducted at Meta using a separate internal codebase that is not publicly available.
