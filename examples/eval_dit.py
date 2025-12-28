@@ -122,9 +122,9 @@ def generate_batch(
         images = postprocess_images(
             decoded,
             output_format="0_255",
-            return_type="tensor",
+            current_format="minus_one_to_one",
             unpack=True,
-            spatial_stride=spatial_stride,
+            patch=spatial_stride,
         )
 
     # Convert to PIL

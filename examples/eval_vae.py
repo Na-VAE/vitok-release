@@ -236,10 +236,10 @@ def main():
         # Postprocess reconstructions
         recon_images = postprocess_images(
             output,
-            output_format="0_1",
-            return_type="tensor",
+            output_format="zero_to_one",
+            current_format="minus_one_to_one",
             unpack=True,
-            spatial_stride=spatial_stride,
+            patch=spatial_stride,
         )
 
         # Convert original images to tensors for comparison

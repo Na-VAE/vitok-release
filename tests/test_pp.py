@@ -157,6 +157,35 @@ class TestRegistry:
 
 
 # =============================================================================
+# Test build_transform helpers
+# =============================================================================
+
+
+class TestBuildTransform:
+    """Tests for build_transform parsing edge cases."""
+
+    def test_build_transform_skips_empty_segments(self, real_images):
+        transform = build_transform("to_tensor||normalize(minus_one_to_one)|")
+        result = transform(real_images["square"])
+        assert isinstance(result, torch.Tensor)
+
+    def test_build_transform_whitespace(self, real_images):
+        transform = build_transform("  to_tensor | normalize(minus_one_to_one)  ")
+        result = transform(real_images["square"])
+        assert result.min() >= -1.0 - 1e-5
+        assert result.max() <= 1.0 + 1e-5
+
+    def test_build_transform_empty_string_identity(self):
+        sentinel = object()
+        transform = build_transform("   ")
+        assert transform(sentinel) is sentinel
+
+    def test_build_transform_unknown_op_raises(self):
+        with pytest.raises(KeyError):
+            build_transform("does_not_exist")
+
+
+# =============================================================================
 # Test Individual Transforms with Real Images
 # =============================================================================
 
@@ -258,6 +287,22 @@ class TestPatchifyNaFlex:
         result = transform(real_images["large"])  # 1920x1080
         n_valid = result["ptype"].sum().item()
         assert n_valid <= max_tokens, f"Exceeded token budget: {n_valid} > {max_tokens}"
+
+    def test_patchify_respects_max_grid_size(self, real_images):
+        """Grid dimensions should not exceed max_grid_size."""
+        max_grid = 4
+        transform = build_transform(
+            "to_tensor|normalize(minus_one_to_one)|patchify(512, 16, 1024, max_grid_size=4)"
+        )
+        result = transform(real_images["large"])
+
+        grid_h = result["grid_h"].item()
+        grid_w = result["grid_w"].item()
+        n_valid = result["ptype"].sum().item()
+
+        assert grid_h <= max_grid
+        assert grid_w <= max_grid
+        assert grid_h * grid_w == n_valid
 
     def test_patchify_grid_consistency(self, real_images):
         """Grid dimensions should match valid patch count."""
@@ -414,6 +459,18 @@ class TestNaFlexRoundtrip:
         assert result.min() >= 0
         assert result.max() <= 255
 
+    def test_postprocess_requires_original_sizes(self):
+        """unpack=True should require original size metadata."""
+        patch = 1
+        patch_dict = {
+            "patches": torch.zeros(1, 1, 3),
+            "ptype": torch.tensor([[True]]),
+            "yidx": torch.tensor([[0]]),
+            "xidx": torch.tensor([[0]]),
+        }
+        with pytest.raises(ValueError):
+            postprocess_images(patch_dict, unpack=True, patch=patch)
+
 
 # =============================================================================
 # Test preprocess_images High-Level API
@@ -539,6 +596,33 @@ class TestWebDatasetIntegration:
         # Each should have different valid counts
         valid_counts = batch["ptype"].sum(dim=1).tolist()
         assert len(set(valid_counts)) > 1, "Expected different valid counts"
+
+
+# =============================================================================
+# Test patch_collate_fn Tensor Paths
+# =============================================================================
+
+
+class TestPatchCollateTensorInputs:
+    """Test collate behavior for raw tensor batches."""
+
+    def test_patch_collate_tensor_with_labels(self):
+        img1 = torch.zeros(3, 4, 4)
+        img2 = torch.ones(3, 4, 4)
+
+        batch, labels = patch_collate_fn([(img1, 1), (img2, 2)])
+
+        assert batch.shape == (2, 3, 4, 4)
+        assert labels.tolist() == [1, 2]
+
+    def test_patch_collate_tensor_without_labels(self):
+        img1 = torch.zeros(3, 4, 4)
+        img2 = torch.ones(3, 4, 4)
+
+        batch, labels = patch_collate_fn([img1, img2])
+
+        assert batch.shape == (2, 3, 4, 4)
+        assert labels is None
 
 
 # =============================================================================

@@ -210,6 +210,7 @@ def main():
         batch_size=args.batch_size,
         num_workers=args.num_workers,
         seed=args.seed,
+        return_labels=True,
     )
 
     # Create scheduler
@@ -243,13 +244,15 @@ def main():
 
     while step < args.steps:
         try:
-            batch, _ = next(loader_iter)
+            batch, labels = next(loader_iter)
         except StopIteration:
             loader_iter = iter(loader)
-            batch, _ = next(loader_iter)
+            batch, labels = next(loader_iter)
 
         # Move to device
         batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
+        if labels is not None:
+            batch['label'] = labels.to(device)
 
         # Convert to training dtype
         if 'patches' in batch:
