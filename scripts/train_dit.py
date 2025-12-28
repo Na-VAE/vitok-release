@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""DiT training script with flow matching.
+"""DiT training script with DDPM noise prediction and UniPC sampling.
 
 Example usage:
     # Single GPU
@@ -30,7 +30,7 @@ from torch.distributed._composable.fsdp import fully_shard, MixedPrecisionPolicy
 from vitok import AEConfig, create_ae, load_ae
 from vitok import DiTConfig, create_dit, load_dit
 from vitok import StreamingWebDatasetConfig, create_streaming_dataloader
-from vitok.diffusion import FlowMatchingScheduler
+from vitok.diffusion import UniPCScheduler, unipc_sample
 from vitok.datasets.io import postprocess_images
 from vitok.utils.weights import load_weights
 
@@ -305,8 +305,13 @@ def main():
             if 'scheduler' in state:
                 lr_scheduler.load_state_dict(state['scheduler'])
 
-    # Scheduler for flow matching
-    flow_scheduler = FlowMatchingScheduler(num_train_timesteps=1000)
+    # Scheduler for training and sampling
+    noise_scheduler = UniPCScheduler(
+        num_train_timesteps=1000,
+        beta_schedule="scaled_linear",
+        prediction_type="epsilon",
+        solver_order=3,
+    )
 
     # Dataloader
     if config.hf_repo:
@@ -397,13 +402,13 @@ def main():
         # Sample timesteps and add noise
         noise = torch.randn_like(z)
         t_idx = torch.randint(0, 1000, (z.shape[0],), device=device)
-        noisy_z = flow_scheduler.add_noise(z, noise, t_idx)
+        noisy_z = noise_scheduler.add_noise(z, noise, t_idx)
 
         # Forward pass
         optimizer.zero_grad(set_to_none=True)
 
         with autocast_ctx():
-            v_pred = dit({
+            noise_pred = dit({
                 "z": noisy_z,
                 "t": t_idx.float(),
                 "context": context,
@@ -411,9 +416,8 @@ def main():
                 "xidx": patch_dict.get("xidx"),
             })
 
-        # Flow matching loss: predict velocity v = noise - z
-        target = flow_scheduler.get_velocity_target(z, noise)
-        loss = (v_pred.float() - target).pow(2).mean()
+        # DDPM epsilon prediction loss: predict the noise
+        loss = (noise_pred.float() - noise).pow(2).mean()
 
         # Backward
         loss.backward()
@@ -473,16 +477,21 @@ def main():
                 sample_labels = torch.arange(min(16, config.num_classes), device=device)
                 sample_z = torch.randn(len(sample_labels), z.shape[1], z.shape[2], device=device)
 
-                from vitok.diffusion.flow_matching import euler_sample
-                samples_z = euler_sample(
-                    ema,
-                    flow_scheduler,
+                # Create model wrapper for UniPC
+                def ema_model_fn(x, t, cond=None):
+                    with autocast_ctx():
+                        return ema({"z": x, "t": t, "context": cond})
+
+                samples_z = unipc_sample(
+                    ema_model_fn,
+                    noise_scheduler,
                     sample_z,
-                    sample_labels,
                     num_steps=50,
-                    cfg_scale=4.0,
+                    order=3,
+                    guidance_scale=4.0,
+                    cond=sample_labels,
+                    uncond=torch.full_like(sample_labels, config.num_classes),
                     device=device,
-                    autocast_ctx=autocast_ctx,
                 )
 
                 # Decode with AE

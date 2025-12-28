@@ -27,8 +27,7 @@ from PIL import Image
 
 from vitok import AEConfig, load_ae
 from vitok import DiTConfig, load_dit
-from vitok.diffusion import FlowMatchingScheduler
-from vitok.diffusion.flow_matching import euler_sample
+from vitok.diffusion import UniPCScheduler, unipc_sample
 from vitok.datasets.io import postprocess_images
 
 
@@ -82,22 +81,30 @@ def sample_images(
     z = torch.randn(batch_size, num_tokens, code_width, device=device, dtype=torch.float32)
 
     # Create scheduler
-    scheduler = FlowMatchingScheduler()
+    scheduler = UniPCScheduler(
+        num_train_timesteps=1000,
+        beta_schedule="scaled_linear",
+        prediction_type="epsilon",
+        solver_order=3,
+    )
 
-    # Sample with flow matching
-    def autocast_ctx():
-        return torch.autocast(device_type='cuda', dtype=dtype)
+    # Create model wrapper for UniPC
+    def model_fn(x, t, cond=None):
+        """Wrapper to convert DiT interface to UniPC interface."""
+        with torch.autocast(device_type='cuda', dtype=dtype):
+            return dit({"z": x, "t": t, "context": cond})
 
     with torch.no_grad():
-        z_denoised = euler_sample(
-            dit,
+        z_denoised = unipc_sample(
+            model_fn,
             scheduler,
             z,
-            labels,
             num_steps=num_steps,
-            cfg_scale=cfg_scale,
+            order=3,
+            guidance_scale=cfg_scale,
+            cond=labels,
+            uncond=torch.full_like(labels, 1000),  # null class
             device=device,
-            autocast_ctx=autocast_ctx,
         )
 
         # Create decode dict
