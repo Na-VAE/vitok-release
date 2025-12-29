@@ -461,15 +461,39 @@ def main():
             avg = {k: (v / log_count).item() for k, v in log_metrics.items()}
             avg['training/lr'] = lr
             avg['training/grad_norm'] = float(grad_norm) if isinstance(grad_norm, torch.Tensor) else grad_norm
-            avg['timing/samples_per_sec'] = (args.batch_size * log_count) / elapsed
+            avg['timing/samples_per_sec'] = (args.batch_size * log_count * world_size) / elapsed
+            avg['timing/step_time'] = elapsed / log_count
+
+            # GPU memory stats
+            if torch.cuda.is_available():
+                mem_allocated = torch.cuda.max_memory_allocated() / 1e9  # GB
+                mem_reserved = torch.cuda.max_memory_reserved() / 1e9  # GB
+                avg['memory/allocated_gb'] = mem_allocated
+                avg['memory/reserved_gb'] = mem_reserved
+                torch.cuda.reset_peak_memory_stats()
+
+            # MFU estimation (Model FLOPs Utilization)
+            # Rough estimate: 6 * n_params * batch_size * seq_len for transformer forward+backward
+            # A100: 312 TFLOPS bf16, H100: 989 TFLOPS bf16
+            if step > 1:  # Skip first step (compilation)
+                tokens_per_step = args.batch_size * args.max_tokens * world_size
+                # ~6N FLOPs per token for forward+backward (2 forward + 4 backward)
+                flops_per_step = 6 * n_params * tokens_per_step
+                flops_per_sec = flops_per_step / (elapsed / log_count)
+                # Assume A100 (312 TFLOPS) - adjust if using different GPU
+                gpu_tflops = 312e12 * world_size
+                mfu = flops_per_sec / gpu_tflops * 100
+                avg['timing/mfu_percent'] = mfu
 
             if rank == 0:
+                mem_str = f" | mem: {mem_allocated:.1f}GB" if torch.cuda.is_available() else ""
+                mfu_str = f" | MFU: {avg.get('timing/mfu_percent', 0):.1f}%" if 'timing/mfu_percent' in avg else ""
                 print(f"Step {step}/{args.steps} | "
                       f"loss: {avg['loss/total']:.4f} | "
                       f"charb: {avg['loss/charb']:.4f} | "
                       f"ssim: {avg['loss/ssim']:.4f} | "
                       f"dino: {avg['loss/dino']:.4f} | "
-                      f"lr: {lr:.2e}")
+                      f"lr: {lr:.2e}{mem_str}{mfu_str}")
 
             if wandb_enabled:
                 wandb.log(avg, step=step)
