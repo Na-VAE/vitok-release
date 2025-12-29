@@ -452,7 +452,7 @@ def create_scheduler(
     if start_lr is None:
         start_lr = 1e-7
     if final_lr is None:
-        final_lr = 1e-6
+        final_lr = 1e-5
 
     if schedule_type == "cosine":
         return CosineScheduler(

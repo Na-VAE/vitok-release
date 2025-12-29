@@ -38,7 +38,7 @@ class AEConfig:
     float8: bool = False
     use_layer_scale: bool = True
     layer_scale_init: float = 1e-4
-    drop_path_rate: float = 0.2
+    drop_path_rate: float = 0.0
     sw: Optional[int] = None
     class_token: bool = False
     reg_tokens: int = 0
