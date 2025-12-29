@@ -73,7 +73,7 @@ def main():
     parser.add_argument("--steps", type=int, default=100000)
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--weight_decay", type=float, default=0.01)
-    parser.add_argument("--warmup_ratio", type=float, default=0.1)
+    parser.add_argument("--warmup_ratio", type=float, default=0.05)
     parser.add_argument("--grad_clip", type=float, default=1.0)
     parser.add_argument("--optimizer", type=str, default="adamw",
                         choices=["adamw", "muon"], help="Optimizer to use")
@@ -418,17 +418,17 @@ def main():
             t_step = time.perf_counter() - t_step_start
             print(f"[DEBUG] First step total: {t_step:.2f}s")
 
-        # Accumulate metrics
-        log_metrics['loss/total'] = log_metrics.get('loss/total', 0) + loss.item()
-        log_metrics['loss/charb'] = log_metrics.get('loss/charb', 0) + charb_loss.item()
-        log_metrics['loss/ssim'] = log_metrics.get('loss/ssim', 0) + ssim_loss.item()
-        log_metrics['loss/dino'] = log_metrics.get('loss/dino', 0) + dino_loss.item()
+        # Accumulate metrics (keep as tensors to avoid GPU sync every step)
+        log_metrics['loss/total'] = log_metrics.get('loss/total', 0) + loss.detach()
+        log_metrics['loss/charb'] = log_metrics.get('loss/charb', 0) + charb_loss.detach()
+        log_metrics['loss/ssim'] = log_metrics.get('loss/ssim', 0) + ssim_loss.detach()
+        log_metrics['loss/dino'] = log_metrics.get('loss/dino', 0) + dino_loss.detach()
         log_count += 1
 
-        # Log
+        # Log (only call .item() here to minimize GPU syncs)
         if step % args.log_freq == 0:
             elapsed = time.perf_counter() - t_log_start
-            avg = {k: v / log_count for k, v in log_metrics.items()}
+            avg = {k: (v / log_count).item() for k, v in log_metrics.items()}
             avg['training/lr'] = lr
             avg['training/grad_norm'] = float(grad_norm) if isinstance(grad_norm, torch.Tensor) else grad_norm
             avg['timing/samples_per_sec'] = (args.batch_size * log_count) / elapsed
