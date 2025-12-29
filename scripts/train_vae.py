@@ -43,7 +43,7 @@ from vitok.evaluators import MetricCalculator
 from dino_perceptual import DINOPerceptual
 
 # SSIM
-from torchmetrics.image import structural_similarity_index_measure as SSIM
+from torchmetrics.functional.image import structural_similarity_index_measure as SSIM
 
 import wandb
 
@@ -116,9 +116,11 @@ def main():
     use_compile = args.compile and not args.no_compile
 
     # Setup distributed
+    print("[DEBUG] Setting up distributed...")
     rank, world_size, local_rank, device, device_mesh = tu.setup_distributed(args.seed)
     dtype = torch.bfloat16
     use_fsdp = args.fsdp and world_size > 1
+    print(f"[DEBUG] Distributed setup complete: rank={rank}, world_size={world_size}, device={device}")
 
     # Output directory
     output_dir = Path(args.output_dir)
@@ -128,20 +130,28 @@ def main():
     # Initialize wandb
     wandb_enabled = args.wandb_project and rank == 0
     if wandb_enabled:
+        print("[DEBUG] Initializing wandb...")
         wandb.init(project=args.wandb_project, name=args.wandb_name, config=vars(args))
+        print("[DEBUG] wandb initialized")
 
     # Create model
     if rank == 0:
         print(f"Creating AE model: {args.variant}")
     config = AEConfig(variant=args.variant)
     model = create_ae(config)
+    if rank == 0:
+        print("[DEBUG] Model created, moving to device...")
     model.to(device=device, dtype=dtype)
+    if rank == 0:
+        print("[DEBUG] Model on device")
 
     # Compile if requested (before FSDP/DDP wrapping)
     if use_compile:
         if rank == 0:
             print("Compiling model...")
         model = torch.compile(model, fullgraph=True)
+        if rank == 0:
+            print("[DEBUG] Model compiled")
 
     # Wrap with FSDP2 or DDP
     if world_size > 1:
@@ -162,13 +172,19 @@ def main():
         print(f"Model parameters: {n_params / 1e6:.1f}M")
 
     # Optimizer
+    if rank == 0:
+        print(f"[DEBUG] Creating optimizer: {args.optimizer}...")
     if args.optimizer == "muon":
         from muon import Muon
         optimizer = Muon(model.parameters(), lr=args.lr, momentum=0.95)
     else:
         optimizer = AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay, betas=(0.9, 0.95), fused=True)
+    if rank == 0:
+        print("[DEBUG] Optimizer created")
 
     # LR Scheduler
+    if rank == 0:
+        print("[DEBUG] Creating LR scheduler...")
     warmup_steps = int(args.warmup_ratio * args.steps)
     scheduler = tu.create_scheduler(
         optimizer=optimizer,
@@ -177,6 +193,8 @@ def main():
         lr=args.lr,
         warmup_steps=warmup_steps,
     )
+    if rank == 0:
+        print("[DEBUG] Scheduler created")
 
     # Build train_state for DCP checkpointing
     train_state = {
@@ -195,6 +213,7 @@ def main():
     # Create dataloader (on ALL ranks)
     if rank == 0:
         print(f"Loading data from: {args.data}")
+        print("[DEBUG] Building dataloader...")
 
     # Build preprocessing string with square crop probability
     # We use a mixed approach: sometimes square crop, sometimes native aspect ratio
@@ -218,8 +237,12 @@ def main():
         source=args.data, pp=pp_string, batch_size=args.batch_size,
         num_workers=args.num_workers, seed=args.seed + rank + start_step,
     )
+    if rank == 0:
+        print("[DEBUG] Dataloader created")
 
     # Perceptual losses
+    if rank == 0:
+        print("[DEBUG] Setting up perceptual losses...")
     tile_sampler = RandomTileSampler(
         n_tiles=args.n_tiles,
         tile_size=(args.tile_size, args.tile_size),
@@ -228,14 +251,26 @@ def main():
 
     dino_loss_fn = None
     if args.dino_perceptual > 0:
+        if rank == 0:
+            print("[DEBUG] Loading DINO perceptual model...")
         dino_loss_fn = DINOPerceptual(model_size='B', target_size=args.tile_size)
+        if rank == 0:
+            print("[DEBUG] DINO model loaded, moving to device...")
         dino_loss_fn = dino_loss_fn.to(device).eval()
         if use_compile:
+            if rank == 0:
+                print("[DEBUG] Compiling DINO model...")
             dino_loss_fn = torch.compile(dino_loss_fn, fullgraph=True)
+        if rank == 0:
+            print("[DEBUG] DINO ready!")
 
     # Evaluation metric calculator
+    if rank == 0:
+        print("[DEBUG] Creating eval metrics calculator...")
     eval_metrics = MetricCalculator(metrics=('ssim', 'psnr'))
     eval_metrics.move_model_to_device(device)
+    if rank == 0:
+        print("[DEBUG] Eval metrics ready")
 
     # Separate eval dataloader (if provided)
     eval_loader = None
@@ -255,8 +290,11 @@ def main():
     # Training loop
     if rank == 0:
         print(f"\nStarting training for {args.steps} steps...")
+        print("[DEBUG] Creating data iterator...")
     model.train()
     loader_iter = iter(loader)
+    if rank == 0:
+        print("[DEBUG] Data iterator created, fetching first batch...")
     step = start_step
 
     log_metrics = {}
@@ -269,15 +307,32 @@ def main():
     pbar = tqdm(total=args.steps, initial=start_step, disable=rank != 0, desc="Training")
 
     while step < args.steps:
+        t_step_start = time.perf_counter()
+
+        # Data loading
+        t_data_start = time.perf_counter()
         try:
             batch, _ = next(loader_iter)
         except StopIteration:
             loader_iter = iter(loader)
             batch, _ = next(loader_iter)
+        t_data = time.perf_counter() - t_data_start
 
+        if step == 0 and rank == 0:
+            print(f"[DEBUG] First batch loaded in {t_data:.2f}s")
+            print(f"[DEBUG] Batch keys: {list(batch.keys())}")
+            if 'patches' in batch:
+                print(f"[DEBUG] patches shape: {batch['patches'].shape}")
+
+        # Move to device
+        t_move_start = time.perf_counter()
         batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
         if 'patches' in batch:
             batch['patches'] = batch['patches'].to(dtype)
+        t_move = time.perf_counter() - t_move_start
+
+        if step == 0 and rank == 0:
+            print(f"[DEBUG] Data moved to device in {t_move:.2f}s")
 
         optimizer.zero_grad(set_to_none=True)
 
@@ -285,8 +340,14 @@ def main():
         lr = scheduler.step()
 
         # Forward
+        t_fwd_start = time.perf_counter()
         with torch.autocast(device_type='cuda', dtype=dtype):
             decode_dict = model(batch)
+        torch.cuda.synchronize()
+        t_fwd = time.perf_counter() - t_fwd_start
+
+        if step == 0 and rank == 0:
+            print(f"[DEBUG] Forward pass in {t_fwd:.2f}s")
 
         ptype = batch['ptype']
         diff = decode_dict['patches'] - batch['patches']
@@ -337,7 +398,13 @@ def main():
                     loss = loss + args.dino_perceptual * dino_loss
 
         # Backward
+        t_bwd_start = time.perf_counter()
         loss.backward()
+        torch.cuda.synchronize()
+        t_bwd = time.perf_counter() - t_bwd_start
+
+        if step == 0 and rank == 0:
+            print(f"[DEBUG] Backward pass in {t_bwd:.2f}s")
 
         # Gradient clipping
         grad_norm = tu.clip_grad_norm_(grad_params, args.grad_clip, use_fsdp=use_fsdp, world_size=world_size)
@@ -346,6 +413,10 @@ def main():
         step += 1
         train_state['step'] = step
         pbar.update(1)
+
+        if step == 1 and rank == 0:
+            t_step = time.perf_counter() - t_step_start
+            print(f"[DEBUG] First step total: {t_step:.2f}s")
 
         # Accumulate metrics
         log_metrics['loss/total'] = log_metrics.get('loss/total', 0) + loss.item()
