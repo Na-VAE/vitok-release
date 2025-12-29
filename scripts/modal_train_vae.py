@@ -120,6 +120,70 @@ def _sync_code_to_volume():
     print("Code sync complete!")
 
 
+# 8xA100 function for production training
+@app.function(
+    image=base_image,
+    gpu="A100-80GB:8",
+    timeout=86400,  # 24 hours
+    volumes={
+        "/checkpoints": checkpoint_volume,
+        "/code": code_volume,
+    },
+    secrets=[
+        modal.Secret.from_name("huggingface-secret"),
+        modal.Secret.from_name("wandb-secret"),
+    ],
+)
+def train_vae(
+    steps: int = 100000,
+    log_freq: int = 100,
+    eval_freq: int = 5000,
+    batch_size: int = 64,  # Per GPU, total = 64*8 = 512
+    wandb_project: str = None,
+    wandb_name: str = None,
+):
+    """Run VAE training on 8xA100 with FSDP."""
+    import subprocess
+    import os
+
+    os.environ["PYTHONPATH"] = "/code/vitok-release:/code/dino_perceptual"
+    os.chdir("/code/vitok-release")
+
+    data_source = "hf://timm/imagenet-22k-wds/imagenet22k-train-{0000..1023}.tar"
+
+    # Use torchrun for multi-GPU
+    cmd = [
+        "torchrun",
+        "--nproc_per_node=8",
+        "--master_port=29500",
+        "scripts/train_vae.py",
+        "--data", data_source,
+        "--steps", str(steps),
+        "--batch_size", str(batch_size),
+        "--max_size", "512",
+        "--max_tokens", "256",
+        "--log_freq", str(log_freq),
+        "--eval_freq", str(eval_freq),
+        "--output_dir", "/checkpoints/vae",
+        "--save_freq", "5000",
+        "--marked_freq", "0",
+        "--fsdp",  # Enable FSDP for multi-GPU
+    ]
+
+    if wandb_project:
+        cmd.extend(["--wandb_project", wandb_project])
+    if wandb_name:
+        cmd.extend(["--wandb_name", wandb_name])
+
+    print(f"Running on 8xA100 with FSDP:")
+    print(f"  {' '.join(cmd)}")
+    print()
+
+    result = subprocess.run(cmd, env={**os.environ, "PYTHONUNBUFFERED": "1"})
+    return result.returncode
+
+
+# A100 single GPU function for debug/testing
 @app.function(
     image=base_image,
     gpu="A100-80GB",
@@ -134,61 +198,35 @@ def _sync_code_to_volume():
     ],
 )
 def train_vae_debug(
-    steps: int = 100000,
-    log_freq: int = 100,
-    eval_freq: int = 5000,
+    steps: int = 5000,
+    log_freq: int = 50,
+    eval_freq: int = 500,
     batch_size: int = 256,
     wandb_project: str = None,
     wandb_name: str = None,
-    debug: bool = False,
 ):
-    """Run VAE training on ImageNet-22k.
-
-    Args:
-        steps: Training steps (default: 100k for full run)
-        log_freq: Logging frequency (default: 100)
-        eval_freq: Evaluation frequency (default: 5000)
-        batch_size: Batch size (default: 256, requires A100-80GB)
-        wandb_project: WandB project name
-        wandb_name: WandB run name
-        debug: Use debug settings (small batch, no compile, fewer shards)
-    """
+    """Run VAE training on single A100 (for testing/debug)."""
     import subprocess
     import os
 
-    # Set Python path to use code from volume
     os.environ["PYTHONPATH"] = "/code/vitok-release:/code/dino_perceptual"
-
-    # Change to vitok directory
     os.chdir("/code/vitok-release")
 
-    # Data source - use all shards for production, fewer for debug
-    if debug:
-        data_source = "hf://timm/imagenet-22k-wds/imagenet22k-train-{0000..0049}.tar"
-    else:
-        data_source = "hf://timm/imagenet-22k-wds/imagenet22k-train-{0000..1023}.tar"
+    data_source = "hf://timm/imagenet-22k-wds/imagenet22k-train-{0000..0049}.tar"
 
-    # Build command
     cmd = [
         "python", "scripts/train_vae.py",
-        # Data - use brace expansion to avoid HfFileSystem.glob() stalls
         "--data", data_source,
-        # Training params
         "--steps", str(steps),
         "--batch_size", str(batch_size),
         "--max_size", "512",
         "--max_tokens", "256",
-        # Logging
         "--log_freq", str(log_freq),
         "--eval_freq", str(eval_freq),
-        "--output_dir", "/checkpoints/vae",
+        "--output_dir", "/checkpoints/vae-debug",
         "--save_freq", "5000",
-        "--marked_freq", "0",  # Disabled - use save_freq checkpoints only
+        "--marked_freq", "0",
     ]
-
-    # Debug mode: disable compile for faster startup
-    if debug:
-        cmd.append("--no_compile")
 
     if wandb_project:
         cmd.extend(["--wandb_project", wandb_project])
@@ -199,8 +237,6 @@ def train_vae_debug(
     print(f"  {' '.join(cmd)}")
     print()
 
-    # Run training with unbuffered output
-    import sys
     result = subprocess.run(cmd, env={**os.environ, "PYTHONUNBUFFERED": "1"})
     return result.returncode
 
@@ -210,7 +246,7 @@ def main(
     steps: int = 100000,
     log_freq: int = 100,
     eval_freq: int = 5000,
-    batch_size: int = 256,
+    batch_size: int = 64,  # Per GPU, total = 64*8 = 512
     wandb_project: str = None,
     wandb_name: str = None,
     sync: bool = False,
@@ -223,12 +259,12 @@ def main(
         steps: Number of training steps (default: 100k)
         log_freq: Logging frequency (default: 100)
         eval_freq: Evaluation frequency (default: 5000)
-        batch_size: Batch size per GPU (default: 256)
+        batch_size: Batch size per GPU (default: 64, total 512 on 8xA100)
         wandb_project: Optional wandb project name
         wandb_name: Optional wandb run name
         sync: Sync code before running (default: False)
         sync_only: Only sync code, don't run training (default: False)
-        debug: Debug mode with smaller settings (default: False)
+        debug: Debug mode - uses 1xA100 with smaller settings (default: False)
     """
     # Sync code if requested
     if sync or sync_only:
@@ -238,44 +274,58 @@ def main(
             print("  modal run scripts/modal_train_vae.py")
             return
 
-    # Debug mode overrides
-    if debug:
-        batch_size = min(batch_size, 8)
-        eval_freq = min(eval_freq, 50)
-        log_freq = min(log_freq, 10)
+    n_gpus = 1 if debug else 8
+    total_batch = batch_size * n_gpus
 
     print("=" * 60)
     print("ViTok VAE Training on Modal")
     print("=" * 60)
     print(f"  Model: Ld2-Ld22/1x16x64")
-    print(f"  GPU: A100-80GB")
+    print(f"  GPU: {'1xA100-80GB (debug)' if debug else '8xA100-80GB'}")
     print(f"  Steps: {steps}")
-    print(f"  Batch size: {batch_size}")
+    print(f"  Batch size: {batch_size} x {n_gpus} = {total_batch}")
     print(f"  Log freq: {log_freq}")
     print(f"  Eval freq: {eval_freq}")
     print(f"  Train data: ImageNet-22k ({'50 shards' if debug else '1024 shards'})")
-    print(f"  Compile: {'No' if debug else 'Yes'}")
+    print(f"  FSDP: {'No' if debug else 'Yes'}")
     if wandb_project:
         print(f"  WandB: {wandb_project}/{wandb_name or 'auto'}")
     print("=" * 60)
     print()
 
-    # Estimate cost (with compile: ~0.3 sec/step at bs=256)
-    sec_per_step = 0.3 if not debug else 0.8
+    # Estimate cost
+    if debug:
+        # 1xA100: ~$4.50/hr, ~0.3 sec/step
+        sec_per_step = 0.3
+        hourly_rate = 4.50
+    else:
+        # 8xA100: ~$36/hr, ~0.05 sec/step at bs=512
+        sec_per_step = 0.05
+        hourly_rate = 36.0
+
     est_time_min = steps * sec_per_step / 60
-    est_cost = est_time_min / 60 * 4.50  # $4.50/hr for A100
+    est_cost = est_time_min / 60 * hourly_rate
     print(f"Estimated time: ~{est_time_min:.0f} min")
     print(f"Estimated cost: ~${est_cost:.2f}")
     print()
 
-    result = train_vae_debug.remote(
-        steps=steps,
-        log_freq=log_freq,
-        eval_freq=eval_freq,
-        batch_size=batch_size,
-        wandb_project=wandb_project,
-        wandb_name=wandb_name,
-        debug=debug,
-    )
+    if debug:
+        result = train_vae_debug.remote(
+            steps=steps,
+            log_freq=log_freq,
+            eval_freq=eval_freq,
+            batch_size=batch_size,
+            wandb_project=wandb_project,
+            wandb_name=wandb_name,
+        )
+    else:
+        result = train_vae.remote(
+            steps=steps,
+            log_freq=log_freq,
+            eval_freq=eval_freq,
+            batch_size=batch_size,
+            wandb_project=wandb_project,
+            wandb_name=wandb_name,
+        )
 
     print(f"Training completed with return code: {result}")
