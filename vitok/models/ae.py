@@ -362,7 +362,7 @@ class AE(nn.Module):
         """Full forward pass: encode, sample, decode."""
         if self.encoder:
             x = self.encode(x)
-        elif self.decoder:
+        if self.decoder:
             x = self.decode(x)
         return x
 
