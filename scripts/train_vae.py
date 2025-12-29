@@ -178,7 +178,7 @@ def main():
         from muon import Muon
         optimizer = Muon(model.parameters(), lr=args.lr, momentum=0.95)
     else:
-        optimizer = AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay, betas=(0.9, 0.95), fused=True)
+        optimizer = AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay, betas=(0.9, 0.99), fused=True)
     if rank == 0:
         print("[DEBUG] Optimizer created")
 
