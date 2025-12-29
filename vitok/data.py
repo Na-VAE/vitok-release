@@ -121,26 +121,88 @@ def create_dataloader(
 
 
 def _get_hf_shard_urls(source: str) -> List[str]:
-    """Parse hf://repo/subdir/*.tar and get streaming URLs."""
+    """Parse hf://repo/subdir/*.tar and get streaming URLs.
+
+    Supports glob patterns like:
+        hf://timm/imagenet-22k-wds/imagenet22k-train-{0000..0099}.tar  (brace expansion)
+        hf://timm/imagenet-22k-wds/imagenet22k-train-00*.tar  (glob via HF API)
+        hf://timm/imagenet-22k-wds/*.tar  (all shards)
+    """
+    import fnmatch
+    import os
+    import re
+
     try:
-        from huggingface_hub import HfFileSystem
+        from huggingface_hub import HfFileSystem, get_token
     except ImportError:
         raise ImportError("huggingface_hub is required for HuggingFace sources")
 
-    # Parse: hf://repo/subdir/*.tar or hf://repo/*.tar
     if not source.startswith("hf://"):
         raise ValueError(f"Expected hf:// source, got: {source}")
 
     path = source[5:]  # Remove "hf://"
+
+    # Get HF token for authentication
+    hf_token = get_token()
+    auth_header = f" -H 'Authorization:Bearer {hf_token}'" if hf_token else ""
+
+    # Check for brace expansion pattern like {0000..0099}
+    brace_match = re.search(r'\{(\d+)\.\.(\d+)\}', path)
+    if brace_match:
+        # Handle brace expansion directly without HF API call
+        start = int(brace_match.group(1))
+        end = int(brace_match.group(2))
+        width = len(brace_match.group(1))
+
+        # Extract repo and file pattern
+        # path = "timm/imagenet-22k-wds/imagenet22k-train-{0000..0049}.tar"
+        # prefix = "timm/imagenet-22k-wds/imagenet22k-train-"
+        # suffix = ".tar"
+        prefix = path[:brace_match.start()]
+        suffix = path[brace_match.end():]
+
+        # Find the last / before the brace to separate repo path from filename
+        last_slash = prefix.rfind('/')
+        if last_slash == -1:
+            raise ValueError(f"Invalid hf:// source format: {source}")
+
+        repo_path = prefix[:last_slash]  # "timm/imagenet-22k-wds"
+        file_prefix = prefix[last_slash + 1:]  # "imagenet22k-train-"
+
+        # Parse repo (org/repo) from repo_path
+        repo_parts = repo_path.split('/')
+        if len(repo_parts) >= 2:
+            repo = '/'.join(repo_parts[:2])
+            subdir = '/'.join(repo_parts[2:]) if len(repo_parts) > 2 else ''
+        else:
+            raise ValueError(f"Invalid hf:// source format: {source}")
+
+        print(f"[Data] Brace expansion: repo={repo}, subdir={subdir}, file_prefix={file_prefix}, range={start}-{end}")
+
+        shard_urls = []
+        for i in range(start, end + 1):
+            num_str = str(i).zfill(width)
+            filename = f"{file_prefix}{num_str}{suffix}"
+            if subdir:
+                rel_path = f"{subdir}/{filename}"
+            else:
+                rel_path = filename
+            url = f"pipe:curl -s -L --connect-timeout 30 --retry 3 https://huggingface.co/datasets/{repo}/resolve/main/{rel_path}{auth_header}"
+            shard_urls.append(url)
+
+        print(f"[Data] Generated {len(shard_urls)} shard URLs")
+        return shard_urls
+
+    # Parse for glob patterns (* or ?)
     parts = path.split("/")
 
     if len(parts) < 2:
         raise ValueError(f"Invalid hf:// source format: {source}")
 
-    # Find pattern (last part with *)
+    # Find pattern (last part with * or ?)
     pattern_idx = None
     for i, part in enumerate(parts):
-        if "*" in part:
+        if "*" in part or "?" in part:
             pattern_idx = i
             break
 
@@ -154,14 +216,15 @@ def _get_hf_shard_urls(source: str) -> List[str]:
         pattern = parts[pattern_idx]
         subdir = "/".join(parts[pattern_idx + 1:]) if pattern_idx + 1 < len(parts) else None
 
-    # Handle repo/subdir split
+    # Handle repo/subdir split (org/repo/subdir case)
     if "/" in repo and not any(c in repo for c in ["*", "?"]):
-        # Could be org/repo/subdir
         repo_parts = repo.split("/")
         if len(repo_parts) > 2:
             repo = "/".join(repo_parts[:2])
             subdir = "/".join(repo_parts[2:])
 
+    # Use HfFileSystem with timeout handling
+    print(f"[Data] Listing HF shards for {repo} with pattern '{pattern}'...")
     fs = HfFileSystem()
     prefix = f"datasets/{repo}"
     if subdir:
@@ -171,12 +234,34 @@ def _get_hf_shard_urls(source: str) -> List[str]:
     shard_urls = []
 
     try:
-        matches = fs.glob(glob_pattern)
+        # Set a timeout for the glob operation
+        import signal
+
+        def timeout_handler(signum, frame):
+            raise TimeoutError(f"HfFileSystem.glob timed out after 60s for {glob_pattern}")
+
+        # Only use signal on main thread (Unix)
+        use_signal = hasattr(signal, 'SIGALRM') and os.name != 'nt'
+        if use_signal:
+            old_handler = signal.signal(signal.SIGALRM, timeout_handler)
+            signal.alarm(60)  # 60 second timeout
+
+        try:
+            matches = fs.glob(glob_pattern)
+        finally:
+            if use_signal:
+                signal.alarm(0)
+                signal.signal(signal.SIGALRM, old_handler)
+
+        print(f"[Data] Found {len(matches)} shards")
+
         for match in matches:
-            # Build streaming URL
+            # Build streaming URL with timeout and retry
             rel_path = match.replace(f"datasets/{repo}/", "")
-            url = f"pipe:curl -s -L https://huggingface.co/datasets/{repo}/resolve/main/{rel_path}"
+            url = f"pipe:curl -s -L --connect-timeout 30 --retry 3 https://huggingface.co/datasets/{repo}/resolve/main/{rel_path}{auth_header}"
             shard_urls.append(url)
+    except TimeoutError as e:
+        raise ValueError(str(e))
     except Exception as e:
         raise ValueError(f"Failed to find shards at {glob_pattern}: {e}")
 
