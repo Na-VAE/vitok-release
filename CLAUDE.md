@@ -17,9 +17,9 @@ source .venv/bin/activate
 uv pip install -e ".[dev]"
 ```
 
-### Modal (GPU Testing)
+### Modal (GPU Training & Testing)
 
-Modal is used for GPU testing. All GPU tests are in `modal_tests/`.
+Modal is used for GPU training and testing.
 
 ```bash
 # Install modal
@@ -28,8 +28,9 @@ pip install modal
 # Authenticate (one-time)
 modal token new
 
-# Set up HuggingFace secret for dataset access
-modal secret create huggingface-secret HF_TOKEN=<your-token>
+# Set up secrets for dataset access and logging
+modal secret create huggingface-secret HF_TOKEN=<your-hf-token>
+modal secret create wandb-secret WANDB_API_KEY=<your-wandb-key>
 ```
 
 ## Running Tests
@@ -92,9 +93,38 @@ torchrun --nproc_per_node=8 scripts/train_vae.py \
 # First time: sync code to Modal volume
 modal run scripts/modal_train_vae.py --sync-only
 
-# Run training (use --sync after code changes)
-modal run scripts/modal_train_vae.py --steps 100
-modal run scripts/modal_train_vae.py --sync --steps 1000
+# Debug run (1xA100, small batch)
+modal run scripts/modal_train_vae.py --sync --debug --steps 100 --wandb-project vitok
+
+# Production run (8xA100, FSDP)
+# Use tmux/screen to keep running after disconnect
+tmux new -s train
+modal run scripts/modal_train_vae.py --sync --batch-size 128 --steps 100000 --wandb-project vitok --wandb-name "run-name"
+# Ctrl+B, D to detach. Reconnect: tmux attach -t train
+
+# Default settings:
+#   - 8xA100-80GB with FSDP
+#   - batch_size=64 per GPU (512 total), use --batch-size 128 for 1024 total
+#   - lr=3e-4, warmup=1%, weight_decay=0.01
+#   - ImageNet-22k (1024 shards)
+```
+
+### Modal Volumes
+
+Checkpoints are saved to Modal Volumes (persistent cloud storage):
+
+```bash
+# List volumes
+modal volume list
+
+# List checkpoints
+modal volume ls vitok-checkpoints
+
+# Download checkpoint locally
+modal volume get vitok-checkpoints /vae/step_5000 ./local_checkpoint/
+
+# Delete old checkpoints
+modal volume rm vitok-checkpoints /vae-debug --recursive
 ```
 
 ## HuggingFace Data Sources
@@ -115,7 +145,6 @@ Use brace expansion syntax to avoid HfFileSystem API stalls:
 - `scripts/` - Training and utility scripts
 - `tests/` - CPU tests (pytest)
 - `modal_tests/` - GPU tests (Modal)
-- `examples/` - Example configs and notebooks
 
 ## Code Style
 
