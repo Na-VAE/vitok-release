@@ -416,14 +416,15 @@ def main():
             tiles_ref = tiles_ref.reshape(B * args.n_tiles, 3, args.tile_size, args.tile_size)
             tiles_pred = tiles_pred.reshape(B * args.n_tiles, 3, args.tile_size, args.tile_size)
 
+            # Compute perceptual losses in bfloat16, but accumulate in float32
             with torch.autocast(device_type='cuda', dtype=dtype):
                 if args.ssim > 0:
                     ssim_val = SSIM(preds=tiles_pred, target=tiles_ref, data_range=2.0)
-                    ssim_loss = 1.0 - ssim_val
+                    ssim_loss = (1.0 - ssim_val).float()
                     loss = loss + args.ssim * ssim_loss
 
                 if args.dino_perceptual > 0 and dino_loss_fn is not None:
-                    dino_loss = dino_loss_fn(tiles_pred, tiles_ref).mean()
+                    dino_loss = dino_loss_fn(tiles_pred, tiles_ref).mean().float()
                     loss = loss + args.dino_perceptual * dino_loss
 
         # Backward
