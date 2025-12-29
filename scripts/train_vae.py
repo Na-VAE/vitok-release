@@ -73,7 +73,7 @@ def main():
     parser.add_argument("--steps", type=int, default=100000)
     parser.add_argument("--lr", type=float, default=3e-4)
     parser.add_argument("--weight_decay", type=float, default=0.01)
-    parser.add_argument("--warmup_ratio", type=float, default=0.05)
+    parser.add_argument("--warmup_ratio", type=float, default=0.01)
     parser.add_argument("--grad_clip", type=float, default=1.0)
     parser.add_argument("--optimizer", type=str, default="adamw",
                         choices=["adamw", "muon"], help="Optimizer to use")
