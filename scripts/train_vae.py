@@ -72,7 +72,7 @@ def main():
     # Training
     parser.add_argument("--steps", type=int, default=100000)
     parser.add_argument("--lr", type=float, default=1e-4)
-    parser.add_argument("--weight_decay", type=float, default=0.01)
+    parser.add_argument("--weight_decay", type=float, default=1e-3)
     parser.add_argument("--warmup_ratio", type=float, default=0.05)
     parser.add_argument("--grad_clip", type=float, default=1.0)
     parser.add_argument("--optimizer", type=str, default="adamw",
@@ -174,13 +174,34 @@ def main():
     # Optimizer
     if rank == 0:
         print(f"[DEBUG] Creating optimizer: {args.optimizer}...")
+
+    # Separate params into decay and no_decay groups
+    decay_params = []
+    no_decay_params = []
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
+        # No weight decay for biases, norms, embeddings
+        if param.ndim <= 1 or 'bias' in name or 'norm' in name or 'embedding' in name:
+            no_decay_params.append(param)
+        else:
+            decay_params.append(param)
+
     if args.optimizer == "muon":
         from muon import Muon
         optimizer = Muon(model.parameters(), lr=args.lr, momentum=0.95)
     else:
-        optimizer = AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay, betas=(0.9, 0.99), fused=True)
+        optimizer = AdamW(
+            [
+                {'params': decay_params, 'weight_decay': args.weight_decay},
+                {'params': no_decay_params, 'weight_decay': 0.0},
+            ],
+            lr=args.lr,
+            betas=(0.9, 0.99),
+            fused=True,
+        )
     if rank == 0:
-        print("[DEBUG] Optimizer created")
+        print(f"[DEBUG] Optimizer created (decay: {len(decay_params)}, no_decay: {len(no_decay_params)} params)")
 
     # LR Scheduler
     if rank == 0:
