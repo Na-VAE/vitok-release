@@ -373,11 +373,19 @@ def main():
         ptype = batch['ptype']
         diff = decode_dict['patches'] - batch['patches']
 
-        # Charbonnier loss
+        # Debug: print diff stats on first step
+        if step == 0 and rank == 0:
+            print(f"[DEBUG] diff shape: {diff.shape}, dtype: {diff.dtype}")
+            print(f"[DEBUG] diff stats: min={diff.min().item():.4f}, max={diff.max().item():.4f}, mean={diff.abs().mean().item():.4f}")
+            print(f"[DEBUG] decode_dict['patches'] stats: min={decode_dict['patches'].min().item():.4f}, max={decode_dict['patches'].max().item():.4f}")
+            print(f"[DEBUG] batch['patches'] stats: min={batch['patches'].min().item():.4f}, max={batch['patches'].max().item():.4f}")
+
+        # Charbonnier loss (compute in float32 for numerical stability)
         if args.charbonnier > 0:
-            charb_per_token = (diff.pow(2) + args.charbonnier_eps**2).sqrt().mean(dim=2)
-            charb_per_token = charb_per_token * ptype
-            actual_tokens = ptype.sum(dim=1).clamp_min(1)
+            diff_f32 = diff.float()
+            charb_per_token = (diff_f32.pow(2) + args.charbonnier_eps**2).sqrt().mean(dim=2)
+            charb_per_token = charb_per_token * ptype.float()
+            actual_tokens = ptype.sum(dim=1).clamp_min(1).float()
             charb_loss = (charb_per_token.sum(dim=1) / actual_tokens).mean()
         else:
             charb_loss = torch.tensor(0.0, device=device)
