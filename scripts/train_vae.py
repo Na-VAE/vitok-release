@@ -354,7 +354,7 @@ def main():
 
         # Charbonnier loss
         if args.charbonnier > 0:
-            charb_per_token = (diff.pow(2) + args.charbonnier_eps**2).sqrt().sum(dim=2)
+            charb_per_token = (diff.pow(2) + args.charbonnier_eps**2).sqrt().mean(dim=2)
             charb_per_token = charb_per_token * ptype
             actual_tokens = ptype.sum(dim=1).clamp_min(1)
             charb_loss = (charb_per_token.sum(dim=1) / actual_tokens).mean()
