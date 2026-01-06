@@ -305,11 +305,18 @@ class AE(nn.Module):
             x = x[:, self.num_special_tokens:]
 
         z = self.to_code(x)
+        # Explicitly copy required keys (torch.compile fullgraph compatible)
         encode_dict = {
-            k: v for k, v in patch_dict.items()
-            if k != 'patches'
+            'ptype': patch_dict['ptype'],
+            'yidx': patch_dict['yidx'],
+            'xidx': patch_dict['xidx'],
+            'original_height': patch_dict['original_height'],
+            'original_width': patch_dict['original_width'],
+            'z': z,
         }
-        encode_dict['z'] = z
+        # Copy optional keys if present
+        if 'attention_mask' in patch_dict:
+            encode_dict['attention_mask'] = patch_dict['attention_mask']
         return encode_dict
 
     def decode(self, encode_dict: Dict[str, torch.Tensor], max_grid_size=None):
@@ -353,9 +360,18 @@ class AE(nn.Module):
             x = x[:, self.num_special_tokens:]
 
         pred_patches = self.to_pixels(x)
-        decode_dict = encode_dict
-        del decode_dict['z']
-        decode_dict['patches'] = pred_patches
+        # Explicitly copy required keys (torch.compile fullgraph compatible)
+        decode_dict = {
+            'ptype': encode_dict['ptype'],
+            'yidx': encode_dict['yidx'],
+            'xidx': encode_dict['xidx'],
+            'original_height': encode_dict['original_height'],
+            'original_width': encode_dict['original_width'],
+            'patches': pred_patches,
+        }
+        # Copy optional keys if present
+        if 'attention_mask' in encode_dict:
+            decode_dict['attention_mask'] = encode_dict['attention_mask']
         return decode_dict
 
     def forward(self, x: Dict[str, torch.Tensor]):
