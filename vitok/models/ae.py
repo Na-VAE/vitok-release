@@ -109,8 +109,6 @@ class AE(nn.Module):
         decoder_heads=12,
         mlp_factor=2.67,
         variational=False,
-        encoder_output_fn = 'layernorm',
-        decoder_output_fn = 'none',
         checkpoint: int = 0,
         spatial_stride: int = 16,
         temporal_stride: int = 1,
@@ -135,8 +133,6 @@ class AE(nn.Module):
         norm_type = 'rmsnorm'
         qk_norm = 'rmsnorm'
         rope_theta = 10000.0
-        self.encoder_output_fn = encoder_output_fn
-        self.decoder_output_fn = decoder_output_fn
         parallel_mlp_attn = True
         sw_every = 1
 
@@ -151,7 +147,6 @@ class AE(nn.Module):
         self.decoder_width = decoder_width
         self.encoder_heads = encoder_heads
         self.decoder_heads = decoder_heads
-        self.decoder_output_fn = decoder_output_fn
         self.variational = variational
         self.checkpoint = checkpoint
         self.spatial_stride = spatial_stride
@@ -305,20 +300,24 @@ class AE(nn.Module):
             x = x[:, self.num_special_tokens:]
 
         z = self.to_code(x)
+        # Explicitly copy required keys (torch.compile fullgraph compatible)
         encode_dict = {
-            k: v for k, v in patch_dict.items()
-            if k != 'patches'
+            'ptype': patch_dict['ptype'],
+            'yidx': patch_dict['yidx'],
+            'xidx': patch_dict['xidx'],
+            'original_height': patch_dict['original_height'],
+            'original_width': patch_dict['original_width'],
+            'z': z,
         }
-        encode_dict['z'] = z
+        # Copy optional keys if present
+        if 'attention_mask' in patch_dict:
+            encode_dict['attention_mask'] = patch_dict['attention_mask']
         return encode_dict
 
     def decode(self, encode_dict: Dict[str, torch.Tensor], max_grid_size=None):
         """Decode latent codes to patches."""
         if not self.decoder:
             raise RuntimeError("Cannot call decode() on an encoder-only model")
-        
-        assert 'original_height' in encode_dict and 'original_width' in encode_dict, \
-            "AE.decode expects 'original_height' and 'original_width' in posterior_dict"
 
         x = self.decoder_embed(encode_dict['z'])
         B, _, _ = x.shape
@@ -353,9 +352,20 @@ class AE(nn.Module):
             x = x[:, self.num_special_tokens:]
 
         pred_patches = self.to_pixels(x)
-        decode_dict = encode_dict
-        del decode_dict['z']
-        decode_dict['patches'] = pred_patches
+        # Explicitly copy required keys (torch.compile fullgraph compatible)
+        decode_dict = {
+            'ptype': encode_dict['ptype'],
+            'yidx': encode_dict['yidx'],
+            'xidx': encode_dict['xidx'],
+            'patches': pred_patches,
+        }
+        if 'original_height' in encode_dict:
+            decode_dict['original_height'] = encode_dict['original_height']
+        if 'original_width' in encode_dict:
+            decode_dict['original_width'] = encode_dict['original_width']
+        # Copy optional keys if present
+        if 'attention_mask' in encode_dict:
+            decode_dict['attention_mask'] = encode_dict['attention_mask']
         return decode_dict
 
     def forward(self, x: Dict[str, torch.Tensor]):

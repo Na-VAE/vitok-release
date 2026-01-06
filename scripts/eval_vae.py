@@ -206,7 +206,7 @@ def evaluate_single(
         # Forward
         with torch.no_grad():
             with torch.autocast(device_type='cuda', dtype=dtype):
-                output = model(batch, sample_posterior=False)
+                output = model(batch)
 
             # Postprocess to images
             recon_images = postprocess_images(
