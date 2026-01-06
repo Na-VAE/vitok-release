@@ -109,8 +109,6 @@ class AE(nn.Module):
         decoder_heads=12,
         mlp_factor=2.67,
         variational=False,
-        encoder_output_fn = 'layernorm',
-        decoder_output_fn = 'none',
         checkpoint: int = 0,
         spatial_stride: int = 16,
         temporal_stride: int = 1,
@@ -135,8 +133,6 @@ class AE(nn.Module):
         norm_type = 'rmsnorm'
         qk_norm = 'rmsnorm'
         rope_theta = 10000.0
-        self.encoder_output_fn = encoder_output_fn
-        self.decoder_output_fn = decoder_output_fn
         parallel_mlp_attn = True
         sw_every = 1
 
@@ -151,7 +147,6 @@ class AE(nn.Module):
         self.decoder_width = decoder_width
         self.encoder_heads = encoder_heads
         self.decoder_heads = decoder_heads
-        self.decoder_output_fn = decoder_output_fn
         self.variational = variational
         self.checkpoint = checkpoint
         self.spatial_stride = spatial_stride
@@ -323,9 +318,6 @@ class AE(nn.Module):
         """Decode latent codes to patches."""
         if not self.decoder:
             raise RuntimeError("Cannot call decode() on an encoder-only model")
-        
-        assert 'original_height' in encode_dict and 'original_width' in encode_dict, \
-            "AE.decode expects 'original_height' and 'original_width' in posterior_dict"
 
         x = self.decoder_embed(encode_dict['z'])
         B, _, _ = x.shape
@@ -365,10 +357,12 @@ class AE(nn.Module):
             'ptype': encode_dict['ptype'],
             'yidx': encode_dict['yidx'],
             'xidx': encode_dict['xidx'],
-            'original_height': encode_dict['original_height'],
-            'original_width': encode_dict['original_width'],
             'patches': pred_patches,
         }
+        if 'original_height' in encode_dict:
+            decode_dict['original_height'] = encode_dict['original_height']
+        if 'original_width' in encode_dict:
+            decode_dict['original_width'] = encode_dict['original_width']
         # Copy optional keys if present
         if 'attention_mask' in encode_dict:
             decode_dict['attention_mask'] = encode_dict['attention_mask']
