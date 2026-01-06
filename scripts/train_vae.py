@@ -87,7 +87,7 @@ def main():
     parser.add_argument("--ssim", type=float, default=0.1)
     parser.add_argument("--dino_perceptual", type=float, default=250.0)
     parser.add_argument("--tile_size", type=int, default=256)
-    parser.add_argument("--n_tiles", type=int, default=2)
+    parser.add_argument("--n_tiles", type=int, default=1)
 
     # Distributed
     parser.add_argument("--fsdp", action="store_true", help="Use FSDP2 instead of DDP")
@@ -274,7 +274,7 @@ def main():
     if args.dino_perceptual > 0:
         if rank == 0:
             print("[DEBUG] Loading DINO perceptual model...")
-        dino_loss_fn = DINOPerceptual(model_size='B', target_size=args.tile_size)
+        dino_loss_fn = DINOPerceptual(model_size='S', target_size=args.tile_size)
         if rank == 0:
             print("[DEBUG] DINO model loaded, moving to device...")
         dino_loss_fn = dino_loss_fn.to(device).eval()
