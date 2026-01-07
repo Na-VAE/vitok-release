@@ -1,6 +1,6 @@
 """ViTok: Vision Transformer Tokenizer with NaFlex."""
 
-from vitok.ae import AE, AEConfig, create_ae, load_ae
+from vitok.ae import AE, AEConfig, create_ae, load_ae, list_pretrained
 from vitok.dit import DiT, DiTConfig, create_dit, load_dit
 from vitok.pp import build_transform, Registry
 from vitok.data import create_dataloader, patch_collate_fn
@@ -14,6 +14,7 @@ __all__ = [
     "AEConfig",
     "create_ae",
     "load_ae",
+    "list_pretrained",
     # DiT
     "DiT",
     "DiTConfig",
