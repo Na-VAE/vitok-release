@@ -60,8 +60,6 @@ def main():
     parser.add_argument("--max_size", type=int, default=256)
     parser.add_argument("--patch_size", type=int, default=16)
     parser.add_argument("--max_tokens", type=int, default=256)
-    parser.add_argument("--square_crop_prob", type=float, default=0.25,
-                        help="Probability of using square crop vs native aspect ratio")
 
     # Model
     parser.add_argument("--variant", type=str, default="Ld2-Ld22/1x16x64",
@@ -216,37 +214,15 @@ def main():
     if rank == 0:
         print(f"Loading data from: {args.data}")
 
-    # Build preprocessing string with square crop probability
-    # We use a mixed approach: sometimes square crop, sometimes native aspect ratio
-    if not 0.0 <= args.square_crop_prob <= 1.0:
-        raise ValueError("--square_crop_prob must be between 0 and 1")
-
-    if args.square_crop_prob <= 0:
-        # Native aspect ratio (naflex-style)
-        pp_string = (
-            f"to_tensor|"
-            f"normalize(minus_one_to_one)|"
-            f"resize_to_token_budget({args.patch_size}, {args.max_tokens})|"
-            f"patchify({args.patch_size}, {args.max_tokens})"
-        )
-    elif args.square_crop_prob >= 1:
-        pp_string = (
-            f"random_resized_crop({args.max_size})|"
-            f"flip|"
-            f"to_tensor|"
-            f"normalize(minus_one_to_one)|"
-            f"patchify({args.patch_size}, {args.max_tokens})"
-        )
-    else:
-        p = args.square_crop_prob
-        pp_string = (
-            f"random_choice(ops=['random_resized_crop({args.max_size})', 'identity'], probs=[{p}, {1.0 - p}])|"
-            f"flip|"
-            f"to_tensor|"
-            f"normalize(minus_one_to_one)|"
-            f"resize_to_token_budget({args.patch_size}, {args.max_tokens})|"
-            f"patchify({args.patch_size}, {args.max_tokens})"
-        )
+    # Build preprocessing string: 25% square crop, 75% native aspect ratio
+    pp_string = (
+        f"random_choice(ops=['random_resized_crop({args.max_size})', 'identity'], probs=[0.25, 0.75])|"
+        f"flip|"
+        f"to_tensor|"
+        f"normalize(minus_one_to_one)|"
+        f"resize_to_token_budget({args.patch_size}, {args.max_tokens})|"
+        f"patchify({args.patch_size}, {args.max_tokens})"
+    )
 
     loader = create_dataloader(
         source=args.data, pp=pp_string, batch_size=args.batch_size,
