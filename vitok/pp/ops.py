@@ -39,13 +39,13 @@ def resize_longest_side(max_size: int):
             new_h, new_w = int(round(h * scale)), int(round(w * scale))
             return TF.resize(img, [new_h, new_w], interpolation=TF.InterpolationMode.LANCZOS, antialias=True)
         else:
-            # Tensor (C, H, W)
+            # Tensor (C, H, W) - use BICUBIC since LANCZOS not supported for tensors
             c, h, w = img.shape
             if max(h, w) <= max_size:
                 return img
             scale = max_size / max(h, w)
             new_h, new_w = max(1, int(round(h * scale))), max(1, int(round(w * scale)))
-            return TF.resize(img, [new_h, new_w], interpolation=TF.InterpolationMode.LANCZOS, antialias=True)
+            return TF.resize(img, [new_h, new_w], interpolation=TF.InterpolationMode.BICUBIC, antialias=True)
     return _resize
 
 
@@ -174,7 +174,7 @@ def patchify(
         # Step 1: Fit to token budget (resize if needed)
         target_h, target_w = _fit_to_token_budget(h, w, patch, max_tokens, max_grid_size)
         if (target_h, target_w) != (h, w):
-            img = TF.resize(img, [target_h, target_w], interpolation=TF.InterpolationMode.LANCZOS, antialias=True)
+            img = TF.resize(img, [target_h, target_w], interpolation=TF.InterpolationMode.BICUBIC, antialias=True)
             h, w = target_h, target_w
 
         orig_h, orig_w = h, w

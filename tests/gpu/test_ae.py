@@ -1,6 +1,6 @@
 """GPU tests for AE (Autoencoder) functionality.
 
-Run with: modal run modal/test_ae_gpu.py
+Run with: modal run tests/gpu/test_ae.py
 
 These tests verify:
 1. AE forward pass works on GPU
@@ -10,7 +10,7 @@ These tests verify:
 """
 
 import modal
-from modal.env import app, image, compat_image, VITOK_PATH, V2_PATH
+from tests.gpu.env import app, image, compat_image, VITOK_PATH, V2_PATH
 
 
 @app.function(image=image, gpu="T4", timeout=300)
@@ -232,7 +232,7 @@ def test_ae_weight_compatibility():
     sys.path.insert(0, VITOK_PATH)
 
     from vitok.models.ae import AE as Release_AE
-    from vitok.variant_parser import decode_ae_variant
+    from vitok.models.ae import decode_variant as decode_ae_variant
 
     torch.manual_seed(42)
     torch.cuda.manual_seed(42)

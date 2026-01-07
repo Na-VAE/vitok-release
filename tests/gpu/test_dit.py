@@ -1,6 +1,6 @@
 """GPU tests for DiT (Diffusion Transformer) functionality.
 
-Run with: modal run modal/test_dit_gpu.py
+Run with: modal run tests/gpu/test_dit.py
 
 These tests verify:
 1. DiT forward pass works on GPU
@@ -10,7 +10,7 @@ These tests verify:
 """
 
 import modal
-from modal.env import app, image, compat_image, VITOK_PATH, V2_PATH
+from tests.gpu.env import app, image, compat_image, VITOK_PATH, V2_PATH
 
 
 @app.function(image=image, gpu="T4", timeout=300)
@@ -219,7 +219,7 @@ def test_dit_weight_compatibility():
     sys.path.insert(0, VITOK_PATH)
 
     from vitok.models.dit import DiT as Release_DiT
-    from vitok.variant_parser import decode_dit_variant
+    from vitok.models.dit import decode_variant as decode_dit_variant
 
     torch.manual_seed(42)
     torch.cuda.manual_seed(42)

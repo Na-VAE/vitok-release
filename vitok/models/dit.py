@@ -332,3 +332,54 @@ class DiT(nn.Module):
 def Model(**kw):
     """Factory function for DiT model."""
     return DiT(**kw)
+
+
+# --- Variant Parsing ---
+
+# Base presets for model architectures
+_BASE_WIDTHS = {"B": 768, "L": 1024, "G": 1728, "T": 3072, "E": 4096}
+_BASE_DEPTHS = {"B": 12, "L": 24, "G": 32, "T": 40, "E": 48}
+_BASE_HEADS = {"B": 12, "L": 16, "G": 24, "T": 24, "E": 32}
+
+
+def decode_variant(variant: str) -> Dict[str, int]:
+    """Parse DiT variant string like "L/256" or "Gd32/512".
+
+    Format: {model}/{num_tokens}
+
+    Examples:
+        - "L/256": Large model, 256 tokens (16x16 grid)
+        - "Gd32h20/512": Giant with 32 depth and 20 heads, 512 tokens
+        - "w2048_d32_h32/256": Custom config
+
+    Returns:
+        Dict with width, depth, num_heads, num_tokens
+    """
+    import re
+
+    v, num_tokens = variant.split("/")
+    num_tokens = int(num_tokens)
+
+    # Custom underscore format: w{width}_d{depth}_h{heads}
+    if v.startswith('w') and '_d' in v and '_h' in v:
+        parts = v.split('_')
+        width = int(parts[0][1:])
+        depth = int(parts[1][1:])
+        heads = int(parts[2][1:])
+        return {"width": width, "depth": depth, "num_heads": heads, "num_tokens": num_tokens}
+
+    # Inline modifiers
+    width_match = re.search(r'w(\d+)', v)
+    depth_match = re.search(r'd(\d+)', v)
+    heads_match = re.search(r'h(\d+)', v)
+
+    base_name = re.sub(r'w\d+|d\d+|h\d+', '', v)
+
+    if base_name and base_name not in _BASE_WIDTHS:
+        raise ValueError(f"Unknown variant: {base_name}. Available: {list(_BASE_WIDTHS.keys())}")
+
+    width = int(width_match.group(1)) if width_match else _BASE_WIDTHS.get(base_name, 1024)
+    depth = int(depth_match.group(1)) if depth_match else _BASE_DEPTHS.get(base_name, 24)
+    heads = int(heads_match.group(1)) if heads_match else _BASE_HEADS.get(base_name, 16)
+
+    return {"width": width, "depth": depth, "num_heads": heads, "num_tokens": num_tokens}

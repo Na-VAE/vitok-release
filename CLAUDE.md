@@ -38,36 +38,37 @@ modal secret create wandb-secret WANDB_API_KEY=<your-wandb-key>
 ### Local CPU Tests
 
 ```bash
-pytest tests/ -v                    # All tests
-pytest tests/test_ae.py -v          # AE tests
-pytest tests/test_dit.py -v         # DiT tests
-pytest tests/test_pp.py -v          # Preprocessing tests
+pytest tests/cpu/ -v                    # All CPU tests
+pytest tests/cpu/test_ae.py -v          # AE tests
+pytest tests/cpu/test_dit.py -v         # DiT tests
+pytest tests/cpu/test_pp.py -v          # Preprocessing tests
 ```
 
 ### Modal GPU Tests
 
 ```bash
 # Quick smoke tests (~1 min, cheapest)
-modal run modal_tests/test_all.py --quick
+modal run tests/gpu/test_all.py --quick
 
 # Full GPU tests (~3 min)
-modal run modal_tests/test_all.py
+modal run tests/gpu/test_all.py
 
 # Individual component tests
-modal run modal_tests/test_ae_gpu.py
-modal run modal_tests/test_dit_gpu.py
+modal run tests/gpu/test_ae.py
+modal run tests/gpu/test_dit.py
+modal run tests/gpu/test_checkpoints.py
 ```
 
 ### Testing Data Loading on Modal
 
-For quick data pipeline tests, create a simple test:
+For quick data pipeline tests:
 
 ```bash
 # Test data loading with cheap T4 GPU
 modal run scripts/modal_train_vae.py --sync --steps 5
 
 # Or use the debug script for data-only testing (no training)
-modal run modal_tests/test_data.py
+modal run tests/gpu/test_data.py
 ```
 
 ## Training
@@ -143,8 +144,11 @@ Use brace expansion syntax to avoid HfFileSystem API stalls:
 
 - `vitok/` - Core library (AE, DiT, data loading, preprocessing)
 - `scripts/` - Training and utility scripts
-- `tests/` - CPU tests (pytest)
-- `modal_tests/` - GPU tests (Modal)
+- `tests/cpu/` - CPU tests (pytest, fast)
+- `tests/gpu/` - GPU tests (Modal)
+- `tests/visual/` - Visual inspection tests
+- `tests/utils/` - Debug utilities
+- `benchmarks/` - Performance benchmarks
 
 ## Code Style
 

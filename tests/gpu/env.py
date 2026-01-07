@@ -3,7 +3,7 @@
 This module defines the Modal image and app configuration used by all GPU tests.
 
 Usage:
-    from modal.env import app, image, VITOK_PATH, V2_PATH
+    from tests.gpu.env import app, image, VITOK_PATH, V2_PATH
 """
 
 import modal
