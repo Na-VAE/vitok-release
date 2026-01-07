@@ -1,15 +1,21 @@
-"""Public API for ViTok Autoencoder."""
+"""Public API for ViTok Autoencoder.
+
+Example:
+    from vitok import AE, decode_variant
+    from vitok.utils import load_weights
+
+    model = AE(**decode_variant("Ld2-Ld22/1x16x64"))
+    model.to(device="cuda", dtype=torch.bfloat16)
+    load_weights(model, "checkpoint.safetensors")
+    model.eval()
+"""
 
 from __future__ import annotations
 
 import re
-from typing import Any, Dict, Optional
-
-import torch
+from typing import Any, Dict
 
 from vitok.models.ae import AE
-from vitok.utils import load_weights, resolve_dtype, resolve_checkpoint, list_pretrained
-
 
 # Base presets for model architectures
 _BASE_WIDTHS = {"B": 768, "L": 1024, "G": 1728, "T": 3072, "E": 4096}
@@ -68,7 +74,8 @@ def decode_variant(variant: str) -> Dict[str, Any]:
         - "w4096_d40_h32/1x16x64": Custom width/depth/heads
 
     Returns:
-        Dict with encoder_width, decoder_width, encoder_depth, decoder_depth,
+        Dict ready to unpack into AE constructor:
+        encoder_width, decoder_width, encoder_depth, decoder_depth,
         encoder_heads, decoder_heads, mlp_factor, spatial_stride, temporal_stride,
         channels_per_token, pixels_per_token
     """
@@ -101,90 +108,4 @@ def decode_variant(variant: str) -> Dict[str, Any]:
     }
 
 
-def create_ae(variant: str, **kwargs) -> AE:
-    """Create an AE model from variant string.
-
-    Args:
-        variant: Model variant string (e.g., "B/1x16x64", "Ld2-Ld22/1x16x64")
-        **kwargs: Additional model kwargs (checkpoint, float8, etc.)
-
-    Returns:
-        AE model instance
-    """
-    params = decode_variant(variant)
-    return AE(**params, **kwargs)
-
-
-def load_ae(
-    path: str,
-    variant: str,
-    device: str | torch.device = "cpu",
-    dtype: str | torch.dtype = "float32",
-    strict: bool = True,
-    **kwargs,
-) -> AE:
-    """Load an AE model from checkpoint.
-
-    Args:
-        path: Path to checkpoint file
-        variant: Model variant string
-        device: Target device
-        dtype: Target dtype ("float32", "bfloat16", "float16")
-        strict: Whether to require exact checkpoint match
-        **kwargs: Additional model kwargs
-
-    Returns:
-        AE model instance in eval mode
-    """
-    model = create_ae(variant, **kwargs)
-    model.to(device=device, dtype=resolve_dtype(dtype))
-    load_weights(model, path, strict=strict)
-    model.eval()
-    return model
-
-
-# Add classmethods to AE for convenience
-def _from_variant(cls, variant: str, **kwargs) -> "AE":
-    """Create an AE model from variant string.
-
-    Args:
-        variant: Model variant string (e.g., "B/1x16x64", "Ld2-Ld22/1x16x64")
-        **kwargs: Additional model kwargs
-
-    Returns:
-        AE model instance
-    """
-    return create_ae(variant, **kwargs)
-
-
-def _load(
-    cls,
-    path: str,
-    variant: str,
-    device: str | torch.device = "cpu",
-    dtype: str | torch.dtype = "float32",
-    strict: bool = True,
-    **kwargs,
-) -> "AE":
-    """Load an AE model from checkpoint.
-
-    Args:
-        path: Path to checkpoint file
-        variant: Model variant string
-        device: Target device
-        dtype: Target dtype
-        strict: Whether to require exact checkpoint match
-        **kwargs: Additional model kwargs
-
-    Returns:
-        AE model instance in eval mode
-    """
-    return load_ae(path, variant, device, dtype, strict, **kwargs)
-
-
-# Attach classmethods to AE
-AE.from_variant = classmethod(_from_variant)
-AE.load = classmethod(_load)
-
-
-__all__ = ["AE", "create_ae", "load_ae", "decode_variant", "list_pretrained"]
+__all__ = ["AE", "decode_variant"]
