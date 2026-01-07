@@ -218,7 +218,17 @@ def main():
 
     # Build preprocessing string with square crop probability
     # We use a mixed approach: sometimes square crop, sometimes native aspect ratio
-    if args.square_crop_prob > 0:
+    if not 0.0 <= args.square_crop_prob <= 1.0:
+        raise ValueError("--square_crop_prob must be between 0 and 1")
+
+    if args.square_crop_prob <= 0:
+        # Native aspect ratio (naflex-style)
+        pp_string = (
+            f"to_tensor|"
+            f"normalize(minus_one_to_one)|"
+            f"patchify({args.max_size}, {args.patch_size}, {args.max_tokens})"
+        )
+    elif args.square_crop_prob >= 1:
         pp_string = (
             f"random_resized_crop({args.max_size})|"
             f"flip|"
@@ -227,8 +237,10 @@ def main():
             f"patchify({args.max_size}, {args.patch_size}, {args.max_tokens})"
         )
     else:
-        # Native aspect ratio (naflex-style)
+        p = args.square_crop_prob
         pp_string = (
+            f"random_choice(ops=['random_resized_crop({args.max_size})', 'identity'], probs=[{p}, {1.0 - p}])|"
+            f"flip|"
             f"to_tensor|"
             f"normalize(minus_one_to_one)|"
             f"patchify({args.max_size}, {args.patch_size}, {args.max_tokens})"
