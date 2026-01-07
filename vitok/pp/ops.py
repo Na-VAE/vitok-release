@@ -1,8 +1,7 @@
-"""Registered preprocessing ops.
+"""Preprocessing ops.
 
 All ops follow the factory pattern:
-    @Registry.register("op_name")
-    def get_op_name(arg1, arg2, ...):
+    def op_name(arg1, arg2, ...):
         def _op(input):
             # transform input
             return output
@@ -20,24 +19,20 @@ import torchvision.transforms as T
 import torchvision.transforms.functional as TF
 from PIL import Image
 
-from vitok.pp.registry import Registry
-
 
 # =============================================================================
 # Crop ops (PIL -> PIL)
 # =============================================================================
 
 
-@Registry.register("center_crop")
-def get_center_crop(size: int):
+def center_crop(size: int):
     """Center crop to size x size."""
     def _center_crop(img: Image.Image) -> Image.Image:
         return TF.center_crop(img, [size, size])
     return _center_crop
 
 
-@Registry.register("random_resized_crop")
-def get_random_resized_crop(
+def random_resized_crop(
     size: int,
     scale: Tuple[float, float] = (0.8, 1.0),
     ratio: Tuple[float, float] = (0.75, 1.333),
@@ -58,8 +53,7 @@ def get_random_resized_crop(
 # =============================================================================
 
 
-@Registry.register("flip")
-def get_flip(p: float = 0.5):
+def flip(p: float = 0.5):
     """Random horizontal flip with probability p."""
     return T.RandomHorizontalFlip(p)
 
@@ -69,14 +63,12 @@ def get_flip(p: float = 0.5):
 # =============================================================================
 
 
-@Registry.register("to_tensor")
-def get_to_tensor():
+def to_tensor():
     """Convert PIL Image to Tensor (0-1 range)."""
     return T.ToTensor()
 
 
-@Registry.register("normalize")
-def get_normalize(mode: str = "minus_one_to_one"):
+def normalize(mode: str = "minus_one_to_one"):
     """Normalize tensor.
 
     Args:
@@ -130,8 +122,7 @@ def _fit_to_token_budget(
     return new_h, new_w
 
 
-@Registry.register("patchify")
-def get_patchify(
+def patchify(
     max_size: int = 512,
     patch: int = 16,
     max_tokens: int = 256,
@@ -233,11 +224,26 @@ def get_patchify(
     return _patchify
 
 
+# =============================================================================
+# OPS registry (simple dict)
+# =============================================================================
+
+OPS = {
+    "center_crop": center_crop,
+    "random_resized_crop": random_resized_crop,
+    "flip": flip,
+    "to_tensor": to_tensor,
+    "normalize": normalize,
+    "patchify": patchify,
+}
+
+
 __all__ = [
-    "get_center_crop",
-    "get_random_resized_crop",
-    "get_flip",
-    "get_to_tensor",
-    "get_normalize",
-    "get_patchify",
+    "center_crop",
+    "random_resized_crop",
+    "flip",
+    "to_tensor",
+    "normalize",
+    "patchify",
+    "OPS",
 ]

@@ -34,8 +34,8 @@ import pandas as pd
 import numpy as np
 from PIL import Image
 
-from vitok import AEConfig, load_ae
-from vitok.naflex_io import postprocess_images
+from vitok import load_ae
+from vitok.naflex_io import postprocess
 from vitok.data import create_dataloader
 from vitok.evaluators import MetricCalculator
 
@@ -192,10 +192,10 @@ def evaluate_single(
     data_iter = iter(loader)
     for step in range(total_steps):
         try:
-            batch, _ = next(data_iter)
+            batch = next(data_iter)
         except StopIteration:
             data_iter = iter(loader)
-            batch, _ = next(data_iter)
+            batch = next(data_iter)
 
         # Move to device
         batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v
@@ -209,19 +209,19 @@ def evaluate_single(
                 output = model(batch)
 
             # Postprocess to images
-            recon_images = postprocess_images(
+            recon_images = postprocess(
                 output,
                 output_format="minus_one_to_one",
                 current_format="minus_one_to_one",
-                unpack=True,
+                do_unpack=True,
                 patch=patch_size,
                 max_grid_size=max_grid_size,
             )
-            ref_images = postprocess_images(
+            ref_images = postprocess(
                 batch,
                 output_format="minus_one_to_one",
                 current_format="minus_one_to_one",
-                unpack=True,
+                do_unpack=True,
                 patch=patch_size,
                 max_grid_size=max_grid_size,
             )
@@ -275,7 +275,6 @@ def main():
     parser.add_argument("--checkpoint", type=str, required=True,
                         help="Path to VAE checkpoint")
     parser.add_argument("--variant", type=str, default="Ld2-Ld22/1x16x64")
-    parser.add_argument("--variational", action="store_true")
 
     # Data sources
     parser.add_argument("--data", type=str, default=None,
@@ -310,11 +309,7 @@ def main():
         print(f"Configs: {args.eval_configs}")
 
     # Load model
-    config = AEConfig(
-        variant=args.variant,
-        variational=args.variational,
-    )
-    model = load_ae(args.checkpoint, config, device=device, dtype=dtype)
+    model = load_ae(args.checkpoint, args.variant, device=device, dtype=str(dtype).replace('torch.', ''))
     model.eval()
 
     if args.compile and hasattr(torch, 'compile'):

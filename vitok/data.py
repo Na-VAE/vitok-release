@@ -26,32 +26,24 @@ def patch_collate_fn(batch):
     """Collate function for patchified data.
 
     Handles:
-    - (dict, label) tuples from patchified pipelines
-    - (tensor, label) tuples from square image pipelines
-    - plain dicts or tensors (no labels)
+    - dicts from patchified pipelines
+    - tensors from square image pipelines
     """
     if len(batch) == 0:
-        return {}, None
+        return {}
 
-    if isinstance(batch[0], tuple):
-        patch_dicts, labels = zip(*batch)
-        labels = torch.tensor(labels, dtype=torch.long) if labels[0] is not None else None
-    else:
-        patch_dicts = batch
-        labels = None
-
-    if isinstance(patch_dicts[0], torch.Tensor):
-        return torch.stack(patch_dicts, dim=0), labels
+    if isinstance(batch[0], torch.Tensor):
+        return torch.stack(batch, dim=0)
 
     collated = {}
-    for k in patch_dicts[0].keys():
-        items = [d[k] for d in patch_dicts]
+    for k in batch[0].keys():
+        items = [d[k] for d in batch]
         if isinstance(items[0], torch.Tensor):
             collated[k] = torch.stack(items, dim=0)
         else:
             collated[k] = items
 
-    return collated, labels
+    return collated
 
 
 def create_dataloader(
@@ -62,8 +54,6 @@ def create_dataloader(
     seed: int = 0,
     prefetch_factor: int = 4,
     min_size: Optional[int] = None,
-    return_labels: bool = False,
-    label_key: str = "cls",
     shuffle_buffer: int = 100000,
 ) -> wds.WebLoader:
     """Create a dataloader from source with preprocessing.
@@ -79,12 +69,10 @@ def create_dataloader(
         seed: Random seed for shuffling
         prefetch_factor: Prefetch factor
         min_size: Optional minimum image size filter
-        return_labels: Whether to return labels
-        label_key: Key for labels in WebDataset samples
         shuffle_buffer: Shuffle buffer size
 
     Returns:
-        WebLoader yielding (batch_dict, labels) tuples
+        WebLoader yielding batch dicts
     """
     transform = build_transform(pp)
 
@@ -98,19 +86,17 @@ def create_dataloader(
     if not tar_files:
         raise ValueError(f"No tar files found for source: {source}")
 
-    dataset = _WebDatasetWrapper(
+    dataset = _build_webdataset_pipeline(
         tar_files=tar_files,
         transform=transform,
         batch_size=batch_size,
         seed=seed,
         shuffle_buffer=shuffle_buffer,
         min_size=min_size,
-        return_labels=return_labels,
-        label_key=label_key,
     )
 
     loader = wds.WebLoader(
-        dataset.build(),
+        dataset,
         batch_size=None,
         num_workers=num_workers,
         prefetch_factor=prefetch_factor if num_workers > 0 else None,
@@ -289,76 +275,37 @@ def _get_local_tar_files(source: str) -> List[str]:
     return []
 
 
-class _WebDatasetWrapper:
-    """Internal wrapper for building WebDataset pipelines."""
+def _build_webdataset_pipeline(
+    tar_files: List[str],
+    transform: Callable,
+    batch_size: int,
+    seed: int,
+    shuffle_buffer: int,
+    min_size: Optional[int],
+):
+    """Build the WebDataset pipeline."""
+    rank = dist.get_rank() if dist.is_initialized() else 0
+    world_size = dist.get_world_size() if dist.is_initialized() else 1
 
-    def __init__(
-        self,
-        tar_files: List[str],
-        transform: Callable,
-        batch_size: int,
-        seed: int,
-        shuffle_buffer: int,
-        min_size: Optional[int],
-        return_labels: bool,
-        label_key: str,
-    ):
-        self.tar_files = tar_files
-        self.transform = transform
-        self.batch_size = batch_size
-        self.seed = seed
-        self.shuffle_buffer = shuffle_buffer
-        self.min_size = min_size
-        self.return_labels = return_labels
-        self.label_key = label_key
+    # Shuffle and split tar files by rank
+    tar_rng = random.Random(seed)
+    tar_files_copy = tar_files[:]
+    tar_rng.shuffle(tar_files_copy)
+    rank_tar_files = [tar_files_copy[i] for i in range(rank, len(tar_files_copy), world_size)]
 
-    def build(self):
-        """Build the WebDataset pipeline."""
-        rank = dist.get_rank() if dist.is_initialized() else 0
-        world_size = dist.get_world_size() if dist.is_initialized() else 1
+    sample_shuffle_seed = seed + rank
 
-        # Shuffle and split tar files by rank
-        tar_rng = random.Random(self.seed)
-        tar_files = self.tar_files[:]
-        tar_rng.shuffle(tar_files)
-        rank_tar_files = [tar_files[i] for i in range(rank, len(tar_files), world_size)]
+    def has_image(sample: dict) -> bool:
+        return any(k in sample for k in ("jpg", "jpeg", "png", "webp", "image"))
 
-        sample_shuffle_seed = self.seed + rank
-
-        dataset = (
-            wds.WebDataset(
-                rank_tar_files,
-                handler=wds.ignore_and_continue,
-                nodesplitter=wds.split_by_node,
-                shardshuffle=False,
-                resampled=True,
-            )
-            .shuffle(self.shuffle_buffer, seed=sample_shuffle_seed)
-            .decode("pil", handler=wds.ignore_and_continue)
-            .select(self._has_image)
-            .map(self._normalize_keys)
-            .map_dict(jpg=self._ensure_rgb)
-            .select(self._filter_size)
-            .map(self._process)
-            .batched(self.batch_size, partial=False, collation_fn=patch_collate_fn)
-        )
-        return dataset
-
-    @staticmethod
-    def _has_image(sample: dict) -> bool:
-        return any(k in sample for k in ("jpg", "jpeg", "png", "webp"))
-
-    @staticmethod
-    def _normalize_keys(sample: dict) -> dict:
+    def normalize_keys(sample: dict) -> dict:
         for key in ("jpg", "jpeg", "png", "webp"):
             if key in sample:
-                if key != "jpg":
-                    sample["jpg"] = sample[key]
+                sample["image"] = sample[key]
                 return sample
         return sample
 
-    @staticmethod
-    def _ensure_rgb(img: Image.Image) -> Image.Image:
+    def ensure_rgb(img: Image.Image) -> Image.Image:
         try:
             img = ImageOps.exif_transpose(img)
         except Exception:
@@ -377,29 +324,34 @@ class _WebDatasetWrapper:
 
         return img
 
-    def _filter_size(self, sample: dict) -> bool:
-        if self.min_size is None:
+    def filter_size(sample: dict) -> bool:
+        if min_size is None:
             return True
-        w, h = sample["jpg"].size
-        return min(w, h) >= self.min_size
+        w, h = sample["image"].size
+        return min(w, h) >= min_size
 
-    def _process(self, sample: dict):
-        image = sample["jpg"]
-        result = self.transform(image)
+    def process(sample: dict):
+        image = sample["image"]
+        return transform(image)
 
-        label = 0
-        if self.return_labels:
-            raw = sample.get(self.label_key)
-            if raw is not None:
-                try:
-                    if isinstance(raw, (bytes, bytearray)):
-                        label = int(raw.decode("utf-8").strip())
-                    elif isinstance(raw, (str, int)):
-                        label = int(raw)
-                except Exception:
-                    label = 0
-
-        return result, label
+    dataset = (
+        wds.WebDataset(
+            rank_tar_files,
+            handler=wds.ignore_and_continue,
+            nodesplitter=wds.split_by_node,
+            shardshuffle=False,
+            resampled=True,
+        )
+        .shuffle(shuffle_buffer, seed=sample_shuffle_seed)
+        .decode("pil", handler=wds.ignore_and_continue)
+        .select(has_image)
+        .map(normalize_keys)
+        .map_dict(image=ensure_rgb)
+        .select(filter_size)
+        .map(process)
+        .batched(batch_size, partial=False, collation_fn=patch_collate_fn)
+    )
+    return dataset
 
 
 __all__ = ["create_dataloader", "patch_collate_fn"]

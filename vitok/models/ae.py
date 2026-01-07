@@ -108,7 +108,6 @@ class AE(nn.Module):
         encoder_heads=12,
         decoder_heads=12,
         mlp_factor=2.67,
-        variational=False,
         checkpoint: int = 0,
         spatial_stride: int = 16,
         temporal_stride: int = 1,
@@ -147,7 +146,6 @@ class AE(nn.Module):
         self.decoder_width = decoder_width
         self.encoder_heads = encoder_heads
         self.decoder_heads = decoder_heads
-        self.variational = variational
         self.checkpoint = checkpoint
         self.spatial_stride = spatial_stride
         self.class_token = class_token
@@ -169,10 +167,7 @@ class AE(nn.Module):
 
             self.patch_embed = nn.Linear(self.pixels_per_token, self.encoder_width)
 
-            self.to_code = nn.Linear(
-                encoder_width,
-                channels_per_token * 2 if variational else channels_per_token,
-            )
+            self.to_code = nn.Linear(encoder_width, channels_per_token)
 
             blocks = []
             for layer_idx in range(encoder_depth):
@@ -371,7 +366,12 @@ class AE(nn.Module):
         return decode_dict
 
     def forward(self, x: Dict[str, torch.Tensor]):
-        """Full forward pass: encode, sample, decode."""
+        """Full forward pass: encode then decode.
+
+        If encoder+decoder: returns decoded patches dict
+        If encoder-only: returns encode dict with 'z'
+        If decoder-only: expects dict with 'z', returns patches dict
+        """
         if self.encoder:
             x = self.encode(x)
         if self.decoder:
