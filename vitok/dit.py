@@ -9,7 +9,7 @@ import torch
 
 from safetensors.torch import load_file
 
-from vitok.configs.variant_parser import decode_dit_variant
+from vitok.variant_parser import decode_dit_variant
 from vitok.models.dit import DiT as _DiT
 from vitok.utils import resolve_dtype
 
