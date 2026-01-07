@@ -1,8 +1,7 @@
-"""Registered preprocessing ops.
+"""Preprocessing ops.
 
 All ops follow the factory pattern:
-    @Registry.register("op_name")
-    def get_op_name(arg1, arg2, ...):
+    def op_name(arg1, arg2, ...):
         def _op(input):
             # transform input
             return output
@@ -20,7 +19,34 @@ import torchvision.transforms as T
 import torchvision.transforms.functional as TF
 from PIL import Image
 
-from vitok.pp.registry import Registry
+
+# =============================================================================
+# Resize ops (PIL -> PIL or Tensor -> Tensor)
+# =============================================================================
+
+
+def resize_longest_side(max_size: int):
+    """Resize so longest side is at most max_size, preserving aspect ratio.
+
+    Works on both PIL Images and Tensors.
+    """
+    def _resize(img):
+        if isinstance(img, Image.Image):
+            w, h = img.size
+            if max(h, w) <= max_size:
+                return img
+            scale = max_size / max(h, w)
+            new_h, new_w = int(round(h * scale)), int(round(w * scale))
+            return TF.resize(img, [new_h, new_w], interpolation=TF.InterpolationMode.LANCZOS, antialias=True)
+        else:
+            # Tensor (C, H, W)
+            c, h, w = img.shape
+            if max(h, w) <= max_size:
+                return img
+            scale = max_size / max(h, w)
+            new_h, new_w = max(1, int(round(h * scale))), max(1, int(round(w * scale)))
+            return TF.resize(img, [new_h, new_w], interpolation=TF.InterpolationMode.LANCZOS, antialias=True)
+    return _resize
 
 
 # =============================================================================
@@ -28,16 +54,14 @@ from vitok.pp.registry import Registry
 # =============================================================================
 
 
-@Registry.register("center_crop")
-def get_center_crop(size: int):
+def center_crop(size: int):
     """Center crop to size x size."""
     def _center_crop(img: Image.Image) -> Image.Image:
         return TF.center_crop(img, [size, size])
     return _center_crop
 
 
-@Registry.register("random_resized_crop")
-def get_random_resized_crop(
+def random_resized_crop(
     size: int,
     scale: Tuple[float, float] = (0.8, 1.0),
     ratio: Tuple[float, float] = (0.75, 1.333),
@@ -58,8 +82,7 @@ def get_random_resized_crop(
 # =============================================================================
 
 
-@Registry.register("flip")
-def get_flip(p: float = 0.5):
+def flip(p: float = 0.5):
     """Random horizontal flip with probability p."""
     return T.RandomHorizontalFlip(p)
 
@@ -69,14 +92,12 @@ def get_flip(p: float = 0.5):
 # =============================================================================
 
 
-@Registry.register("to_tensor")
-def get_to_tensor():
+def to_tensor():
     """Convert PIL Image to Tensor (0-1 range)."""
     return T.ToTensor()
 
 
-@Registry.register("normalize")
-def get_normalize(mode: str = "minus_one_to_one"):
+def normalize(mode: str = "minus_one_to_one"):
     """Normalize tensor.
 
     Args:
@@ -130,114 +151,115 @@ def _fit_to_token_budget(
     return new_h, new_w
 
 
-@Registry.register("patchify")
-def get_patchify(
-    max_size: int = 512,
+def patchify(
     patch: int = 16,
     max_tokens: int = 256,
     max_grid_size: int | None = None,
 ):
     """Convert tensor to patch dictionary.
 
-    This is an all-in-one op that:
-    1. Resizes image to fit within token budget (longest side to max_size first)
-    2. Pads to patch boundary
-    3. Unfolds to patches
-    4. Creates full patch dict
+    Resizes to fit token budget, pads to patch boundary, and unfolds to patches.
 
     Args:
-        max_size: Maximum size for longest side before budget fitting
         patch: Patch size in pixels
         max_tokens: Maximum number of patches (token budget)
         max_grid_size: Optional maximum grid dimension
 
     Input: Tensor (C, H, W) - normalized
-    Output: Dict with patches, ptype, yidx, xidx, attention_mask, etc.
+    Output: Dict with patches, patch_mask, row_idx, col_idx, attention_mask, etc.
     """
     def _patchify(img: torch.Tensor) -> dict:
         c, h, w = img.shape
 
-        # Step 1: Resize longest side to max_size (preserving aspect ratio)
-        long_side = max(h, w)
-        if long_side > max_size:
-            scale = max_size / long_side
-            new_h = max(1, int(round(h * scale)))
-            new_w = max(1, int(round(w * scale)))
-            img = TF.resize(img, [new_h, new_w], interpolation=TF.InterpolationMode.BILINEAR, antialias=True)
-            h, w = new_h, new_w
-
-        # Step 2: Fit to token budget
+        # Step 1: Fit to token budget (resize if needed)
         target_h, target_w = _fit_to_token_budget(h, w, patch, max_tokens, max_grid_size)
         if (target_h, target_w) != (h, w):
-            img = TF.resize(img, [target_h, target_w], interpolation=TF.InterpolationMode.BILINEAR, antialias=True)
+            img = TF.resize(img, [target_h, target_w], interpolation=TF.InterpolationMode.LANCZOS, antialias=True)
             h, w = target_h, target_w
 
-        original_h, original_w = h, w
+        orig_h, orig_w = h, w
 
-        # Step 3: Pad to patch boundary
+        # Step 2: Pad to patch boundary
         pad_h = (patch - h % patch) % patch
         pad_w = (patch - w % patch) % patch
         if pad_h > 0 or pad_w > 0:
             img = F.pad(img, (0, pad_w, 0, pad_h), mode='constant', value=0.0)
 
-        # Step 4: Unfold to patches
+        # Step 3: Unfold to patches
         c, h_padded, w_padded = img.shape
         patches = F.unfold(img.unsqueeze(0), kernel_size=patch, stride=patch)
         patches = patches.squeeze(0).T  # (N, C*patch*patch)
 
-        n_patches_h = h_padded // patch
-        n_patches_w = w_padded // patch
-        n_patches = n_patches_h * n_patches_w
+        grid_rows = h_padded // patch
+        grid_cols = w_padded // patch
+        n_patches = grid_rows * grid_cols
 
-        # Step 5: Generate spatial indices
+        # Step 4: Generate spatial indices
         y_coords, x_coords = torch.meshgrid(
-            torch.arange(n_patches_h),
-            torch.arange(n_patches_w),
+            torch.arange(grid_rows),
+            torch.arange(grid_cols),
             indexing='ij'
         )
-        yidx = y_coords.flatten()
-        xidx = x_coords.flatten()
+        row_idx = y_coords.flatten()
+        col_idx = x_coords.flatten()
 
-        # Step 6: Pad to max_tokens
+        # Step 5: Pad to max_tokens
         patches_full = torch.zeros(max_tokens, patches.shape[1], dtype=patches.dtype)
         patches_full[:n_patches] = patches
 
-        ptype = torch.zeros(max_tokens, dtype=torch.bool)
-        ptype[:n_patches] = True
+        patch_mask = torch.zeros(max_tokens, dtype=torch.bool)
+        patch_mask[:n_patches] = True
 
-        yidx_full = torch.zeros(max_tokens, dtype=torch.long)
-        yidx_full[:n_patches] = yidx
+        row_idx_full = torch.zeros(max_tokens, dtype=torch.long)
+        row_idx_full[:n_patches] = row_idx
 
-        xidx_full = torch.zeros(max_tokens, dtype=torch.long)
-        xidx_full[:n_patches] = xidx
+        col_idx_full = torch.zeros(max_tokens, dtype=torch.long)
+        col_idx_full[:n_patches] = col_idx
 
-        tidx = torch.zeros(max_tokens, dtype=torch.long)
+        time_idx = torch.zeros(max_tokens, dtype=torch.long)
 
-        # Step 7: Create attention mask
-        attn_mask = ptype.unsqueeze(0) & ptype.unsqueeze(1)
+        # Step 6: Create attention mask
+        attn_mask = patch_mask.unsqueeze(0) & patch_mask.unsqueeze(1)
         attn_mask = attn_mask | torch.eye(max_tokens, dtype=torch.bool)
 
         return {
             'patches': patches_full,
-            'ptype': ptype,
-            'yidx': yidx_full,
-            'xidx': xidx_full,
-            'tidx': tidx,
-            'original_height': torch.tensor(original_h, dtype=torch.long),
-            'original_width': torch.tensor(original_w, dtype=torch.long),
-            'grid_h': torch.tensor(n_patches_h, dtype=torch.long),
-            'grid_w': torch.tensor(n_patches_w, dtype=torch.long),
+            'patch_mask': patch_mask,
+            'row_idx': row_idx_full,
+            'col_idx': col_idx_full,
+            'time_idx': time_idx,
+            'orig_height': torch.tensor(orig_h, dtype=torch.long),
+            'orig_width': torch.tensor(orig_w, dtype=torch.long),
+            'grid_rows': torch.tensor(grid_rows, dtype=torch.long),
+            'grid_cols': torch.tensor(grid_cols, dtype=torch.long),
             'attention_mask': attn_mask,
         }
 
     return _patchify
 
 
+# =============================================================================
+# OPS registry (simple dict)
+# =============================================================================
+
+OPS = {
+    "center_crop": center_crop,
+    "random_resized_crop": random_resized_crop,
+    "resize_longest_side": resize_longest_side,
+    "flip": flip,
+    "to_tensor": to_tensor,
+    "normalize": normalize,
+    "patchify": patchify,
+}
+
+
 __all__ = [
-    "get_center_crop",
-    "get_random_resized_crop",
-    "get_flip",
-    "get_to_tensor",
-    "get_normalize",
-    "get_patchify",
+    "center_crop",
+    "random_resized_crop",
+    "resize_longest_side",
+    "flip",
+    "to_tensor",
+    "normalize",
+    "patchify",
+    "OPS",
 ]
