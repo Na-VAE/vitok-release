@@ -10,7 +10,6 @@
 
 - **NaFlex Patchification**: Native aspect-ratio training with flexible token budgets
 - **Asymmetric Encoder-Decoder**: Shallow encoders paired with deep decoders for optimal reconstruction
-- **Flow Matching DiT**: Diffusion Transformer with UniPC sampling for image generation
 - **2D RoPE**: Rotary position embeddings for spatial awareness at any resolution
 - **Streaming Data**: WebDataset and HuggingFace Hub support for large-scale training
 
@@ -56,41 +55,19 @@ decoded = model.decode(encoded)
 images = postprocess(decoded, output_format="0_255", do_unpack=True)
 ```
 
-### Generate Images with DiT
+### Encoder-Only or Decoder-Only
 
 ```python
-from safetensors.torch import load_file
-from vitok import AE, decode_variant, DiTConfig, load_dit
-from vitok.diffusion.unipc import FlowUniPCMultistepScheduler
-import torch
+# Encoder only
+encoder = AE(**decode_variant("Ld2-Ld22/1x16x64"), decoder=False)
+encoder.load_state_dict(load_file("checkpoint.safetensors"), strict=False)
 
-# Load AE
-ae = AE(**decode_variant("Ld2-Ld22/1x16x64"))
-ae.to(device="cuda", dtype=torch.bfloat16)
-ae.load_state_dict(load_file("path/to/ae.safetensors"))
-ae.eval()
-
-# Load DiT
-dit = load_dit("path/to/dit.safetensors", DiTConfig(variant="L/256", code_width=64), device="cuda")
-
-# Setup scheduler
-scheduler = FlowUniPCMultistepScheduler(shift=2.0)
-scheduler.set_timesteps(num_inference_steps=20)
-
-# Generate
-labels = torch.tensor([207, 360, 387, 974], device="cuda")  # ImageNet classes
-z = torch.randn(4, 256, 64, device="cuda")
-
-for t in scheduler.timesteps:
-    model_output = dit({'z': z, 't': t.expand(4), 'context': labels})
-    z = scheduler.step(model_output, t, z).prev_sample
-
-# Decode with ae.decode(...)
+# Decoder only
+decoder = AE(**decode_variant("Ld2-Ld22/1x16x64"), encoder=False)
+decoder.load_state_dict(load_file("checkpoint.safetensors"), strict=False)
 ```
 
 ## Model Variants
-
-### Autoencoder
 
 Format: `{encoder}[-{decoder}]/{temporal}x{spatial}x{channels}`
 
@@ -101,34 +78,6 @@ Format: `{encoder}[-{decoder}]/{temporal}x{spatial}x{channels}`
 | `Ld2-Ld22/1x16x64` | 2-layer encoder, 22-layer decoder (asymmetric) |
 | `Gd4-G/1x16x64` | 4-layer Giant encoder, full Giant decoder |
 
-### DiT (Diffusion Transformer)
-
-Format: `{model}/{num_tokens}`
-
-| Variant | Description |
-|---------|-------------|
-| `B/256` | Base DiT, 256 tokens (16x16) |
-| `L/256` | Large DiT, 256 tokens |
-| `L/1024` | Large DiT, 1024 tokens (32x32) |
-| `G/256` | Giant DiT, 256 tokens |
-
-## Training
-
-See `examples/` for training scripts:
-
-```bash
-# Train DiT on ImageNet
-python examples/train_dit.py \
-    --ae_checkpoint path/to/ae.safetensors \
-    --hf_repo ILSVRC/imagenet-1k \
-    --dit_variant L/256
-
-# Train VAE
-python examples/train_vae.py \
-    --variant Ld2-Ld22/1x16x64 \
-    --data_paths /path/to/shards/
-```
-
 ## Testing
 
 ```bash
@@ -136,25 +85,22 @@ python examples/train_vae.py \
 pytest tests/ -v
 
 # GPU tests via Modal
-modal run modal/test_all.py
+modal run modal_tests/test_all.py
 ```
-
-See [TESTING.md](TESTING.md) for detailed testing instructions.
 
 ## Project Structure
 
 ```
 vitok/
 ├── vitok/
-│   ├── ae.py                 # AEConfig, create_ae, load_ae
-│   ├── dit.py                # DiTConfig, create_dit, load_dit
-│   ├── naflex_io.py          # Image preprocessing/postprocessing
-│   ├── models/               # AE, DiT implementations
-│   ├── diffusion/            # UniPC scheduler
+│   ├── ae.py                 # AE, decode_variant
+│   ├── naflex_io.py          # preprocess, postprocess, unpatchify
+│   ├── data.py               # create_dataloader
+│   ├── models/               # AE implementation
 │   └── pp/                   # Preprocessing pipeline DSL
-├── examples/                 # Training and inference examples
+├── scripts/                  # Training scripts (WIP)
 ├── tests/                    # Test suite
-└── modal/                    # GPU testing infrastructure
+└── modal_tests/              # GPU testing infrastructure
 ```
 
 ## License
@@ -191,11 +137,8 @@ This implementation builds upon ideas from the original ViTok work:
 
 ## Acknowledgments
 
-This is a PyTorch reimplementation designed for simplicity and flexibility, supporting single GPU, single node, and multi-node training environments. The codebase is based on a refactor of:
-
-- [vitok](https://github.com/philippe-eecs/vitok) (PyTorch)
-- [big_vision](https://github.com/google-research/big_vision) by Google Research (JAX)
+This is a PyTorch reimplementation designed for simplicity and flexibility, supporting single GPU, single node, and multi-node training environments.
 
 ## Disclaimer
 
-This repository is an independent public reimplementation of the ViTok-v2 architecture by Philippe Hansen-Estruch. It is not affiliated with, endorsed by, or connected to Meta or Google in any way. The original ViTok-v2 research was conducted at Meta using a separate internal codebase that is not publicly available.
+This repository is an independent public reimplementation of the ViTok-v2 architecture by Philippe Hansen-Estruch. It is not affiliated with, endorsed by, or connected to Meta or Google in any way.
