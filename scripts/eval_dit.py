@@ -36,7 +36,7 @@ import numpy as np
 
 from vitok import AEConfig, load_ae
 from vitok import DiTConfig, load_dit
-from vitok.diffusion import FlowUniPCMultistepScheduler
+from vitok.unipc import FlowUniPCMultistepScheduler
 from vitok import postprocess_images
 
 
