@@ -7,9 +7,11 @@ from typing import Optional
 
 import torch
 
+from safetensors.torch import load_file
+
 from vitok.configs.variant_parser import decode_dit_variant
 from vitok.models.dit import DiT as _DiT
-from vitok.utils import load_weights, resolve_dtype
+from vitok.utils import resolve_dtype
 
 
 @dataclass(frozen=True)
@@ -95,7 +97,7 @@ def load_dit(
     model = create_dit(config, **overrides)
     model.to(device=device, dtype=resolve_dtype(dtype))
     if checkpoint:
-        load_weights(model, checkpoint, strict=strict)
+        model.load_state_dict(load_file(checkpoint), strict=strict)
     model.eval()
     return model
 

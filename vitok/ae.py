@@ -1,12 +1,12 @@
 """Public API for ViTok Autoencoder.
 
 Example:
+    from safetensors.torch import load_file
     from vitok import AE, decode_variant
-    from vitok.utils import load_weights
 
     model = AE(**decode_variant("Ld2-Ld22/1x16x64"))
     model.to(device="cuda", dtype=torch.bfloat16)
-    load_weights(model, "checkpoint.safetensors")
+    model.load_state_dict(load_file("checkpoint.safetensors"))
     model.eval()
 """
 

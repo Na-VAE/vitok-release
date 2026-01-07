@@ -9,7 +9,9 @@ import argparse
 import torch
 
 from vitok import AE, decode_variant
-from vitok.utils import load_weights, setup_distributed, cleanup_distributed
+from safetensors.torch import load_file
+
+from vitok.utils import setup_distributed, cleanup_distributed
 from vitok.data import create_dataloader
 from vitok.naflex_io import postprocess
 from vitok.evaluators import MetricCalculator
@@ -38,7 +40,7 @@ def main():
     # Load model
     model = AE(**decode_variant(args.variant))
     model.to(device=device, dtype=dtype)
-    load_weights(model, args.checkpoint)
+    model.load_state_dict(load_file(args.checkpoint), strict=True)
     model.eval()
 
     patch_size = model.spatial_stride

@@ -34,14 +34,15 @@ pip install -e ".[dev]"
 ### Encode and Decode Images
 
 ```python
+from safetensors.torch import load_file
 from vitok import AE, decode_variant, preprocess, postprocess
-from vitok.utils import load_weights
 from PIL import Image
+import torch
 
 # Load pretrained AE
 model = AE(**decode_variant("Ld2-Ld22/1x16x64"))
 model.to(device="cuda", dtype=torch.bfloat16)
-load_weights(model, "path/to/checkpoint.safetensors")
+model.load_state_dict(load_file("path/to/checkpoint.safetensors"))
 model.eval()
 
 # Encode image
@@ -58,15 +59,15 @@ images = postprocess(decoded, output_format="0_255", do_unpack=True)
 ### Generate Images with DiT
 
 ```python
+from safetensors.torch import load_file
 from vitok import AE, decode_variant, DiTConfig, load_dit
-from vitok.utils import load_weights
 from vitok.diffusion.unipc import FlowUniPCMultistepScheduler
 import torch
 
 # Load AE
 ae = AE(**decode_variant("Ld2-Ld22/1x16x64"))
 ae.to(device="cuda", dtype=torch.bfloat16)
-load_weights(ae, "path/to/ae.safetensors")
+ae.load_state_dict(load_file("path/to/ae.safetensors"))
 ae.eval()
 
 # Load DiT
