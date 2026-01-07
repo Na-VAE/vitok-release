@@ -28,6 +28,47 @@ pip install -e ".[eval]"
 pip install -e ".[dev]"
 ```
 
+## Modal Quickstart (GPU Inference)
+
+Run inference on Modal's cloud GPUs without local GPU setup.
+
+### First-time Setup
+
+```bash
+# Install Modal CLI
+pip install modal
+
+# Authenticate (one-time)
+modal token new
+
+# Pre-build the inference environment (optional, speeds up first run)
+modal run scripts/modal/setup_env.py
+
+# Create volume for caching model weights
+modal run scripts/modal/setup_volume.py
+```
+
+### Run Inference
+
+```bash
+# Run with default model (L-64) and astronaut test image
+modal run scripts/modal/inference.py
+
+# Specify model variant
+modal run scripts/modal/inference.py --model T-64
+
+# Use your own image
+modal run scripts/modal/inference.py --model L-64 --image path/to/image.jpg
+
+# Save output locally
+modal run scripts/modal/inference.py --output reconstructed.png
+
+# List available pretrained models
+modal run scripts/modal/inference.py --list-models
+```
+
+Available models: `L-16`, `L-32`, `L-64`, `T-64`, `T-128`, `T-256`
+
 ## Quick Start
 
 ### Encode and Decode Images
