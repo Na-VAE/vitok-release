@@ -8,6 +8,7 @@ from vitok.utils.pretrained import (
     download_pretrained,
     resolve_checkpoint,
 )
+from vitok.utils.distributed import setup_distributed, cleanup_distributed
 
 __all__ = [
     "load_weights",
@@ -16,4 +17,6 @@ __all__ = [
     "get_pretrained_info",
     "download_pretrained",
     "resolve_checkpoint",
+    "setup_distributed",
+    "cleanup_distributed",
 ]
