@@ -9,7 +9,7 @@ import torch
 
 from vitok.configs.variant_parser import decode_ae_variant
 from vitok.models.ae import AE as _AE
-from vitok.utils import load_weights, resolve_dtype
+from vitok.utils import load_weights, resolve_dtype, resolve_checkpoint, list_pretrained
 
 
 @dataclass(frozen=True)
@@ -17,7 +17,7 @@ class AEConfig:
     """Configuration for ViTok Autoencoder.
 
     Args:
-        variant: Model variant string (e.g., "B/1x16x64", "Ld2-Ld22/1x16x64")
+        variant: Model variant string (e.g., "B/1x16x64", "Ld4-L/1x16x64")
         variational: Whether to use variational encoding
         checkpoint: Gradient checkpointing frequency (0 = disabled)
         float8: Enable float8 training (requires torchao)
@@ -78,30 +78,89 @@ def create_ae(config: AEConfig, **overrides) -> _AE:
 
 
 def load_ae(
-    checkpoint: Optional[str],
-    config: AEConfig,
+    name_or_path: str,
+    config: Optional[AEConfig] = None,
+    *,
+    pretrained: bool = False,
     device: str | torch.device = "cpu",
     dtype: str | torch.dtype = "float32",
     strict: bool = True,
+    cache_dir: Optional[str] = None,
     **overrides,
 ) -> _AE:
-    """Create an AE and optionally load weights.
+    """Load a ViTok Autoencoder.
+
+    Can load from:
+    1. Pretrained model name (e.g., "Ld4-L/1x16x64" with pretrained=True)
+    2. Local checkpoint path with config
+    3. Just create model from config (no checkpoint)
+
+    Examples:
+        # Load pretrained model
+        ae = load_ae("Ld4-L/1x16x64", pretrained=True)
+        ae = load_ae("L-64", pretrained=True)  # alias
+
+        # Load from local checkpoint
+        ae = load_ae("path/to/checkpoint", config=AEConfig(variant="Ld4-L/1x16x64"))
+
+        # Create model without weights
+        ae = load_ae(None, config=AEConfig(variant="B/1x16x64"))
 
     Args:
-        checkpoint: Path to checkpoint file (or None to skip loading)
-        config: AEConfig instance
+        name_or_path: Pretrained model name, local checkpoint path, or None
+        config: AEConfig instance (optional if using pretrained)
+        pretrained: If True, download pretrained weights from HuggingFace Hub
         device: Target device
         dtype: Target dtype ("float32", "bfloat16", "float16")
         strict: Whether to require exact checkpoint match
+        cache_dir: Cache directory for downloaded models
         **overrides: Additional kwargs to override config values
 
     Returns:
-        AE model instance (in eval mode if checkpoint loaded)
+        AE model instance (in eval mode if weights loaded)
     """
+    # Resolve checkpoint path and variant
+    checkpoint_path, variant_override = resolve_checkpoint(
+        name_or_path,
+        pretrained=pretrained,
+        cache_dir=cache_dir,
+    )
+
+    # Determine config
+    if config is None:
+        if variant_override is None:
+            raise ValueError(
+                "Must provide config when not using pretrained model. "
+                f"Available pretrained: {list_pretrained()}"
+            )
+        # Use variant from pretrained registry
+        config = AEConfig(variant=variant_override)
+    elif variant_override is not None:
+        # Override variant from pretrained registry
+        config = AEConfig(
+            variant=variant_override,
+            variational=config.variational,
+            checkpoint=config.checkpoint,
+            float8=config.float8,
+            use_layer_scale=config.use_layer_scale,
+            layer_scale_init=config.layer_scale_init,
+            drop_path_rate=config.drop_path_rate,
+            sw=config.sw,
+            class_token=config.class_token,
+            reg_tokens=config.reg_tokens,
+            train_seq_len=config.train_seq_len,
+            encoder=config.encoder,
+            decoder=config.decoder,
+        )
+
+    # Create model
     model = create_ae(config, **overrides)
     model.to(device=device, dtype=resolve_dtype(dtype))
-    if checkpoint:
-        load_weights(model, checkpoint, strict=strict)
+
+    # Load weights if checkpoint provided
+    if checkpoint_path:
+        load_weights(model, checkpoint_path, strict=strict)
+
     model.eval()
     return model
 
@@ -114,4 +173,5 @@ __all__ = [
     "AEConfig",
     "create_ae",
     "load_ae",
+    "list_pretrained",
 ]
