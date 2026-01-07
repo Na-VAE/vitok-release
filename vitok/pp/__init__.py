@@ -18,7 +18,8 @@ Available ops:
     - patchify(max_size, patch, max_tokens): Resize to budget + create patch dict
 """
 
-from vitok.pp.ops import OPS
+from vitok.pp.ops import OPS, unpatchify, unpack, sample_tiles
 from vitok.pp.registry import build_transform, parse_op
+from vitok.pp.io import preprocess, postprocess
 
-__all__ = ["build_transform", "parse_op", "OPS"]
+__all__ = ["build_transform", "parse_op", "OPS", "preprocess", "postprocess", "unpatchify", "unpack", "sample_tiles"]

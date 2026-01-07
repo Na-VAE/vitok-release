@@ -13,7 +13,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 from vitok.pp import build_transform
 from vitok.data import patch_collate_fn
-from vitok.naflex_io import preprocess_images, postprocess_images, unpatchify
+from vitok.pp.io import preprocess_images, postprocess_images, unpatchify
 
 
 OUTPUT_DIR = Path(__file__).parent / "test_outputs"

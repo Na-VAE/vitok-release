@@ -35,7 +35,8 @@ from tqdm import tqdm
 
 from vitok import AE, decode_variant
 from vitok.data import create_dataloader
-from vitok.naflex_io import postprocess, RandomTileSampler
+from vitok.pp.io import postprocess
+from vitok.pp import sample_tiles
 from vitok import utils as tu
 from vitok.evaluators import MetricCalculator
 
@@ -86,8 +87,10 @@ def main():
     parser.add_argument("--charbonnier_eps", type=float, default=1e-3)
     parser.add_argument("--ssim", type=float, default=0.1)
     parser.add_argument("--dino_perceptual", type=float, default=250.0)
-    parser.add_argument("--tile_size", type=int, default=256)
-    parser.add_argument("--n_tiles", type=int, default=1)
+    parser.add_argument("--tile_size", type=int, default=256,
+                        help="Tile size for perceptual losses")
+    parser.add_argument("--n_tiles", type=int, default=1,
+                        help="Number of tiles per image for perceptual losses")
 
     # Distributed
     parser.add_argument("--fsdp", action="store_true", help="Use FSDP2 instead of DDP")
@@ -263,11 +266,6 @@ def main():
     # Perceptual losses
     if rank == 0:
         print("[DEBUG] Setting up perceptual losses...")
-    tile_sampler = RandomTileSampler(
-        n_tiles=args.n_tiles,
-        tile_size=(args.tile_size, args.tile_size),
-        spatial_stride=args.patch_size,
-    )
 
     dino_loss_fn = None
     if args.dino_perceptual > 0:
@@ -408,14 +406,24 @@ def main():
                     patch=args.patch_size, max_grid_size=max_grid_size,
                 )
 
-            tiles_ref, tile_indices = tile_sampler(ref_images, batch)
-            tiles_pred, _ = tile_sampler(recon_images, batch, indices=tile_indices)
+            # Sample tiles for perceptual losses
+            orig_h = batch['original_height'].to(device)
+            orig_w = batch['original_width'].to(device)
+            tiles_ref, tile_indices = sample_tiles(
+                ref_images, orig_h, orig_w,
+                n_tiles=args.n_tiles, tile_size=(args.tile_size, args.tile_size)
+            )
+            tiles_pred, _ = sample_tiles(
+                recon_images, orig_h, orig_w,
+                n_tiles=args.n_tiles, tile_size=(args.tile_size, args.tile_size),
+                indices=tile_indices
+            )
 
             B = tiles_ref.shape[0]
             tiles_ref = tiles_ref.reshape(B * args.n_tiles, 3, args.tile_size, args.tile_size)
             tiles_pred = tiles_pred.reshape(B * args.n_tiles, 3, args.tile_size, args.tile_size)
 
-            # Compute perceptual losses in bfloat16, but accumulate in float32
+            # Compute perceptual losses
             with torch.autocast(device_type='cuda', dtype=dtype):
                 if args.ssim > 0:
                     ssim_val = SSIM(preds=tiles_pred, target=tiles_ref, data_range=2.0)
