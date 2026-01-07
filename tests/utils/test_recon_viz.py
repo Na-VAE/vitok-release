@@ -47,8 +47,8 @@ def visualize_recon():
     from PIL import Image
     from safetensors.torch import load_file
 
-    from vitok.ae import AEConfig, create_ae
-    from vitok.naflex_io import preprocess_images, postprocess_images
+    from vitok import AE, decode_variant
+    from vitok.pp.io import preprocess_images, postprocess_images
 
     # Download a test image
     print("Downloading test image...")

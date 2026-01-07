@@ -13,7 +13,7 @@ from safetensors.torch import load_file
 
 from vitok.utils import setup_distributed
 from vitok.data import create_dataloader
-from vitok.naflex_io import postprocess
+from vitok.pp.io import postprocess
 from vitok.evaluators import MetricCalculator
 
 
