@@ -30,7 +30,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from vitok import AEConfig, load_ae
 from vitok import DiTConfig, create_dit
 from vitok import create_dataloader
-from vitok.diffusion import FlowUniPCMultistepScheduler
+from vitok.unipc import FlowUniPCMultistepScheduler
 from vitok.naflex_io import postprocess_images
 from safetensors.torch import load_file
 from vitok import training_utils as tu

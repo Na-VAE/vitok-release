@@ -18,7 +18,7 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from vitok.diffusion.unipc import FlowUniPCMultistepScheduler
+from vitok.unipc import FlowUniPCMultistepScheduler
 
 
 class TestUniPCSchedulerBasic:
@@ -321,14 +321,14 @@ def test_unipc_vitokv2_compatibility():
     vitokv2_path = Path(__file__).parent.parent.parent / "vitokv2"
     sys.path.insert(0, str(vitokv2_path))
 
-    from vitok.diffusion.unipc import FlowUniPCMultistepScheduler as V2_Scheduler
+    from vitok.unipc import FlowUniPCMultistepScheduler as V2_Scheduler
 
     # Clear and re-import release version
     for mod in [k for k in list(sys.modules.keys()) if k.startswith('vitok')]:
         del sys.modules[mod]
     sys.path.remove(str(vitokv2_path))
 
-    from vitok.diffusion.unipc import FlowUniPCMultistepScheduler as Release_Scheduler
+    from vitok.unipc import FlowUniPCMultistepScheduler as Release_Scheduler
 
     # Create both schedulers with same config
     v2_sched = V2_Scheduler(shift=2.0, solver_order=2)

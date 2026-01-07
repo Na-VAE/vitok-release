@@ -112,7 +112,7 @@ def test_unipc_sampling():
     sys.path.insert(0, VITOK_PATH)
 
     import torch
-    from vitok.diffusion.unipc import FlowUniPCMultistepScheduler
+    from vitok.unipc import FlowUniPCMultistepScheduler
 
     print(f"PyTorch: {torch.__version__}")
     print(f"CUDA: {torch.cuda.get_device_name(0)}")
