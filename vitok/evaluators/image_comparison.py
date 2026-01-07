@@ -7,7 +7,7 @@ from typing import Callable, Dict, List, Optional, Tuple
 from tqdm import tqdm
 
 from vitok.evaluators.metrics import MetricCalculator
-from vitok.data import create_dataloader, unpack_batch
+from vitok.data import create_dataloader
 
 
 def get_rank() -> int:
@@ -115,11 +115,10 @@ class Evaluator:
         data_iter = iter(self.dataloader)
         for _ in tqdm(range(self.total_steps), disable=disable_tqdm, desc="Evaluating"):
             try:
-                batch_data = next(data_iter)
+                batch = next(data_iter)
             except StopIteration:
                 data_iter = iter(self.dataloader)
-                batch_data = next(data_iter)
-            batch = unpack_batch(batch_data)
+                batch = next(data_iter)
 
             # Move to GPU
             batch = {k: v.to('cuda') if isinstance(v, torch.Tensor) else v

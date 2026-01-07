@@ -44,8 +44,8 @@ def test_dit_forward_gpu():
         'z': torch.randn(batch_size, seq_len, code_width).cuda(),
         't': torch.randint(0, 1000, (batch_size,)).float().cuda(),
         'context': torch.randint(0, 1000, (batch_size,)).cuda(),
-        'yidx': y.flatten().unsqueeze(0).expand(batch_size, -1).cuda(),
-        'xidx': x.flatten().unsqueeze(0).expand(batch_size, -1).cuda(),
+        'row_idx': y.flatten().unsqueeze(0).expand(batch_size, -1).cuda(),
+        'col_idx': x.flatten().unsqueeze(0).expand(batch_size, -1).cuda(),
     }
 
     # Forward pass
@@ -96,8 +96,8 @@ def test_dit_compile():
         'z': torch.randn(batch_size, seq_len, code_width).cuda(),
         't': torch.randint(0, 1000, (batch_size,)).float().cuda(),
         'context': torch.randint(0, 1000, (batch_size,)).cuda(),
-        'yidx': y.flatten().unsqueeze(0).expand(batch_size, -1).cuda(),
-        'xidx': x.flatten().unsqueeze(0).expand(batch_size, -1).cuda(),
+        'row_idx': y.flatten().unsqueeze(0).expand(batch_size, -1).cuda(),
+        'col_idx': x.flatten().unsqueeze(0).expand(batch_size, -1).cuda(),
     }
 
     # Warmup and test
@@ -159,8 +159,8 @@ def test_dit_cfg():
         'z': z_cfg,
         't': t_cfg,
         'context': context_cfg,
-        'yidx': yidx,
-        'xidx': xidx,
+        'row_idx': yidx,
+        'col_idx': xidx,
     }
 
     # Forward pass
@@ -275,8 +275,8 @@ def test_dit_weight_compatibility():
         'z': torch.randn(batch_size, seq_len, code_width).cuda(),
         't': torch.randint(0, 1000, (batch_size,)).float().cuda(),
         'context': torch.randint(0, 1000, (batch_size,)).cuda(),
-        'yidx': y.flatten().unsqueeze(0).expand(batch_size, -1).cuda(),
-        'xidx': x.flatten().unsqueeze(0).expand(batch_size, -1).cuda(),
+        'row_idx': y.flatten().unsqueeze(0).expand(batch_size, -1).cuda(),
+        'col_idx': x.flatten().unsqueeze(0).expand(batch_size, -1).cuda(),
     }
 
     with torch.no_grad():

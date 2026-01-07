@@ -98,19 +98,19 @@ def benchmark_full_train(
     # Create synthetic batch
     max_grid = 512 // 16  # 32x32 grid
     patches = torch.randn(batch_size, max_tokens, 3 * 16 * 16, device=device, dtype=dtype)
-    ptype = torch.ones(batch_size, max_tokens, device=device, dtype=torch.bool)
-    yidx = torch.arange(max_tokens, device=device).unsqueeze(0).expand(batch_size, -1) // 16
-    xidx = torch.arange(max_tokens, device=device).unsqueeze(0).expand(batch_size, -1) % 16
-    original_height = torch.full((batch_size,), 512, device=device, dtype=torch.long)
-    original_width = torch.full((batch_size,), 512, device=device, dtype=torch.long)
+    patch_mask = torch.ones(batch_size, max_tokens, device=device, dtype=torch.bool)
+    row_idx = torch.arange(max_tokens, device=device).unsqueeze(0).expand(batch_size, -1) // 16
+    col_idx = torch.arange(max_tokens, device=device).unsqueeze(0).expand(batch_size, -1) % 16
+    orig_height = torch.full((batch_size,), 512, device=device, dtype=torch.long)
+    orig_width = torch.full((batch_size,), 512, device=device, dtype=torch.long)
 
     synthetic_batch = {
         "patches": patches,
-        "ptype": ptype,
-        "yidx": yidx,
-        "xidx": xidx,
-        "original_height": original_height,
-        "original_width": original_width,
+        "patch_mask": patch_mask,
+        "row_idx": row_idx,
+        "col_idx": col_idx,
+        "orig_height": orig_height,
+        "orig_width": orig_width,
     }
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, fused=True)
@@ -128,14 +128,14 @@ def benchmark_full_train(
         with torch.autocast(device_type="cuda", dtype=dtype):
             decode_dict = model(batch)
 
-        ptype = batch["ptype"]
+        patch_mask = batch["patch_mask"]
         diff = decode_dict["patches"] - batch["patches"]
 
         # Charbonnier loss
         diff_f32 = diff.float()
         charb_per_token = (diff_f32.pow(2) + charbonnier_eps**2).sqrt().mean(dim=2)
-        charb_per_token = charb_per_token * ptype.float()
-        actual_tokens = ptype.sum(dim=1).clamp_min(1).float()
+        charb_per_token = charb_per_token * patch_mask.float()
+        actual_tokens = patch_mask.sum(dim=1).clamp_min(1).float()
         charb_loss = (charb_per_token.sum(dim=1) / actual_tokens).mean()
 
         loss = charbonnier_weight * charb_loss
@@ -154,8 +154,8 @@ def benchmark_full_train(
             )
 
         # Sample tiles
-        orig_h = batch['original_height']
-        orig_w = batch['original_width']
+        orig_h = batch['orig_height']
+        orig_w = batch['orig_width']
         tiles_ref, tile_indices = sample_tiles(
             ref_images, orig_h, orig_w,
             n_tiles=n_tiles, tile_size=(tile_size, tile_size)
@@ -259,12 +259,12 @@ def benchmark_full_train(
         torch.cuda.synchronize()
         t_ae_total += time.perf_counter() - t0
 
-        ptype = synthetic_batch["ptype"]
+        patch_mask = synthetic_batch["patch_mask"]
         diff = decode_dict["patches"] - synthetic_batch["patches"]
         diff_f32 = diff.float()
         charb_per_token = (diff_f32.pow(2) + charbonnier_eps**2).sqrt().mean(dim=2)
-        charb_per_token = charb_per_token * ptype.float()
-        actual_tokens = ptype.sum(dim=1).clamp_min(1).float()
+        charb_per_token = charb_per_token * patch_mask.float()
+        actual_tokens = patch_mask.sum(dim=1).clamp_min(1).float()
         charb_loss = (charb_per_token.sum(dim=1) / actual_tokens).mean()
         loss = charbonnier_weight * charb_loss
 
@@ -286,8 +286,8 @@ def benchmark_full_train(
 
         # Sample tiles
         t0 = time.perf_counter()
-        orig_h = synthetic_batch['original_height']
-        orig_w = synthetic_batch['original_width']
+        orig_h = synthetic_batch['orig_height']
+        orig_w = synthetic_batch['orig_width']
         tiles_ref, tile_indices = sample_tiles(
             ref_images, orig_h, orig_w,
             n_tiles=n_tiles, tile_size=(tile_size, tile_size)
