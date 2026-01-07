@@ -393,7 +393,7 @@ def test_dit_weight_compatibility():
 
     # Import release
     from vitok.models.dit import DiT as Release_DiT
-    from vitok.configs.variant_parser import decode_dit_variant
+    from vitok.variant_parser import decode_dit_variant
 
     # Create release model with same seed
     torch.manual_seed(42)

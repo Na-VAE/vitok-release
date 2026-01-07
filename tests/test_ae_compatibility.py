@@ -98,7 +98,7 @@ def test_ae_weight_compatibility():
 
     # Import release version
     from vitok.models.ae import AE as Release_AE
-    from vitok.configs.variant_parser import decode_ae_variant as release_decode
+    from vitok.variant_parser import decode_ae_variant as release_decode
 
     # Use a small variant for faster testing
     variant = "Bd2-Bd4/1x16x32"

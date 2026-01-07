@@ -219,7 +219,7 @@ def test_dit_weight_compatibility():
     sys.path.insert(0, VITOK_PATH)
 
     from vitok.models.dit import DiT as Release_DiT
-    from vitok.configs.variant_parser import decode_dit_variant
+    from vitok.variant_parser import decode_dit_variant
 
     torch.manual_seed(42)
     torch.cuda.manual_seed(42)
