@@ -131,7 +131,17 @@ class TestOPSDict:
     """Tests for the OPS dictionary."""
 
     def test_all_core_ops_registered(self):
-        expected = ["center_crop", "flip", "normalize", "patchify", "random_resized_crop", "resize_longest_side", "to_tensor"]
+        expected = [
+            "center_crop",
+            "flip",
+            "identity",
+            "normalize",
+            "patchify",
+            "random_choice",
+            "random_resized_crop",
+            "resize_longest_side",
+            "to_tensor",
+        ]
         for op in expected:
             assert op in OPS, f"Missing core op: {op}"
 
@@ -170,6 +180,20 @@ class TestTransformsWithRealImages:
             orig_arr[0, 0], result_arr[0, -1],
             err_msg="Flip didn't reverse horizontally"
         )
+
+    def test_identity(self, real_images):
+        transform = build_transform("identity")
+        img = real_images["landscape"]
+        result = transform(img)
+        assert result.size == img.size
+
+    def test_random_choice_deterministic(self, real_images):
+        transform = build_transform(
+            "random_choice(ops=['center_crop(128)', 'identity'], probs=[1.0, 0.0])"
+        )
+        img = real_images["portrait"]
+        result = transform(img)
+        assert result.size == (128, 128)
 
     def test_to_tensor_value_range(self, real_images):
         transform = build_transform("to_tensor")

@@ -13,6 +13,8 @@ Available ops:
     - center_crop(size): Center crop to size x size
     - random_resized_crop(size, scale=(0.8, 1.0), ratio=(0.75, 1.333)): Random resized crop
     - flip(p=0.5): Random horizontal flip
+    - identity(): No-op transform
+    - random_choice(ops, probs=None): Randomly choose one op to apply
     - to_tensor: PIL to Tensor [0, 1]
     - normalize(mode): "minus_one_to_one" or "imagenet"
     - patchify(max_size, patch, max_tokens): Resize to budget + create patch dict
