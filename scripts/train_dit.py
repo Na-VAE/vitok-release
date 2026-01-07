@@ -27,13 +27,12 @@ import torch.nn as nn
 from torch.distributed._composable.fsdp import fully_shard, MixedPrecisionPolicy
 from torch.nn.parallel import DistributedDataParallel as DDP
 
-from vitok import AEConfig, load_ae
-from vitok import DiTConfig, create_dit
+from vitok import AE, decode_variant, DiT, decode_dit_variant
 from vitok import create_dataloader
 from vitok.unipc import FlowUniPCMultistepScheduler
 from vitok.naflex_io import postprocess_images
 from safetensors.torch import load_file
-from vitok import training_utils as tu
+from vitok import utils as tu
 
 
 @dataclass
@@ -133,21 +132,20 @@ def main():
         return nullcontext()
 
     # Create AE (frozen encoder)
-    ae_config = AEConfig(variant=config.ae_variant, variational=True)
-    ae = load_ae(config.ae_checkpoint, ae_config, device=device, dtype=dtype)
+    ae_params = decode_variant(config.ae_variant)
+    ae = AE(**ae_params)
+    if config.ae_checkpoint:
+        ae.load_state_dict(load_file(config.ae_checkpoint))
+    ae.to(device=device, dtype=dtype)
     ae.eval()
     requires_grad(ae, False)
 
     # Get code width from AE
-    code_width = ae.encoder_width if hasattr(ae, 'encoder_width') else 64
+    code_width = ae_params.get('channels_per_token', 64)
 
     # Create DiT
-    dit_config = DiTConfig(
-        variant=config.dit_variant,
-        code_width=code_width,
-        num_classes=config.num_classes,
-    )
-    dit = create_dit(dit_config)
+    dit_params = decode_dit_variant(config.dit_variant)
+    dit = DiT(**dit_params, code_width=code_width, text_dim=config.num_classes)
     dit.to(device=device, dtype=dtype)
 
     # EMA

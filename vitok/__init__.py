@@ -1,7 +1,7 @@
 """ViTok: Vision Transformer Tokenizer with NaFlex."""
 
-from vitok.ae import AE, decode_variant
-from vitok.dit import DiT, DiTConfig, create_dit, load_dit
+from vitok.models.ae import AE, decode_variant
+from vitok.models.dit import DiT, decode_variant as decode_dit_variant
 from vitok.pp import build_transform, OPS
 from vitok.data import create_dataloader, patch_collate_fn
 from vitok.naflex_io import preprocess, postprocess, unpatchify, unpack
@@ -14,9 +14,7 @@ __all__ = [
     "decode_variant",
     # DiT
     "DiT",
-    "DiTConfig",
-    "create_dit",
-    "load_dit",
+    "decode_dit_variant",
     # Preprocessing
     "build_transform",
     "OPS",

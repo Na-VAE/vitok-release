@@ -16,8 +16,7 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from vitok import DiTConfig, create_dit
-from vitok.models.dit import DiT, timestep_embedding
+from vitok.models.dit import DiT, timestep_embedding, decode_variant as decode_dit_variant
 
 
 class TestDiTInstantiation:
@@ -25,28 +24,24 @@ class TestDiTInstantiation:
 
     def test_basic_instantiation(self):
         """Test basic model creation."""
-        config = DiTConfig(
-            variant="Bd4/256",  # Base width, depth 4
-            code_width=32,
-            num_classes=1000,
-        )
-        model = create_dit(config)
+        dit_params = decode_dit_variant("Bd4/256")
+        model = DiT(**dit_params, code_width=32, text_dim=1000)
 
         assert model is not None
         assert isinstance(model, DiT)
 
     def test_config_options(self):
         """Test various config options."""
-        config = DiTConfig(
-            variant="Bd4/256",
+        dit_params = decode_dit_variant("Bd4/256")
+        model = DiT(
+            **dit_params,
             code_width=64,
-            num_classes=100,
+            text_dim=100,
             use_layer_scale=True,
             layer_scale_init=1e-5,
             class_token=True,
             reg_tokens=4,
         )
-        model = create_dit(config)
 
         assert model.code_width == 64
         assert model.text_dim == 100
@@ -55,8 +50,8 @@ class TestDiTInstantiation:
 
     def test_parameter_count(self):
         """Test that model has expected number of parameters."""
-        config = DiTConfig(variant="Bd4/256", code_width=32)
-        model = create_dit(config)
+        dit_params = decode_dit_variant("Bd4/256")
+        model = DiT(**dit_params, code_width=32, text_dim=1000)
 
         n_params = sum(p.numel() for p in model.parameters())
         print(f"DiT-Sd4/256 params: {n_params:,}")
@@ -68,8 +63,8 @@ class TestDiTForward:
 
     @pytest.fixture
     def model(self):
-        config = DiTConfig(variant="Bd4/256", code_width=32)
-        return create_dit(config).eval()
+        dit_params = decode_dit_variant("Bd4/256")
+        return DiT(**dit_params, code_width=32, text_dim=1000).eval()
 
     @pytest.fixture
     def dit_input(self):
@@ -199,8 +194,8 @@ class TestDiTCFG:
 
     @pytest.fixture
     def model(self):
-        config = DiTConfig(variant="Bd4/256", code_width=32, num_classes=1000)
-        return create_dit(config).eval()
+        dit_params = decode_dit_variant("Bd4/256")
+        return DiT(**dit_params, code_width=32, text_dim=1000).eval()
 
     def test_cfg_batch_doubling(self, model):
         """Test CFG with doubled batch."""
@@ -272,12 +267,8 @@ class TestDiTSpecialTokens:
 
     def test_class_token(self):
         """Test model with class token."""
-        config = DiTConfig(
-            variant="Bd4/256",
-            code_width=32,
-            class_token=True,
-        )
-        model = create_dit(config).eval()
+        dit_params = decode_dit_variant("Bd4/256")
+        model = DiT(**dit_params, code_width=32, text_dim=1000, class_token=True).eval()
 
         assert model.cls_token is not None
         assert model.num_special_tokens == 1
@@ -298,12 +289,8 @@ class TestDiTSpecialTokens:
     def test_register_tokens(self):
         """Test model with register tokens."""
         n_reg = 4
-        config = DiTConfig(
-            variant="Bd4/256",
-            code_width=32,
-            reg_tokens=n_reg,
-        )
-        model = create_dit(config).eval()
+        dit_params = decode_dit_variant("Bd4/256")
+        model = DiT(**dit_params, code_width=32, text_dim=1000, reg_tokens=n_reg).eval()
 
         assert model.reg_token is not None
         assert model.num_special_tokens == n_reg
@@ -323,13 +310,8 @@ class TestDiTSpecialTokens:
     def test_both_special_tokens(self):
         """Test model with both class and register tokens."""
         n_reg = 4
-        config = DiTConfig(
-            variant="Bd4/256",
-            code_width=32,
-            class_token=True,
-            reg_tokens=n_reg,
-        )
-        model = create_dit(config).eval()
+        dit_params = decode_dit_variant("Bd4/256")
+        model = DiT(**dit_params, code_width=32, text_dim=1000, class_token=True, reg_tokens=n_reg).eval()
 
         assert model.cls_token is not None
         assert model.reg_token is not None
@@ -393,7 +375,7 @@ def test_dit_weight_compatibility():
 
     # Import release
     from vitok.models.dit import DiT as Release_DiT
-    from vitok.variant_parser import decode_dit_variant
+    from vitok.models.dit import decode_variant as decode_dit_variant
 
     # Create release model with same seed
     torch.manual_seed(42)

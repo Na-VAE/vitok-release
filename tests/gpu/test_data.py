@@ -4,8 +4,8 @@
 Tests HuggingFace streaming without full training setup.
 
 Usage:
-    modal run modal_tests/test_data.py
-    modal run modal_tests/test_data.py --source "hf://timm/imagenet-22k-wds/imagenet22k-train-{0000..0004}.tar"
+    modal run tests/gpu/test_data.py
+    modal run tests/gpu/test_data.py --source "hf://timm/imagenet-22k-wds/imagenet22k-train-{0000..0004}.tar"
 """
 
 import modal
