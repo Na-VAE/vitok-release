@@ -27,7 +27,7 @@ from PIL import Image
 
 from vitok import AE, decode_variant, DiT, decode_dit_variant
 from vitok.unipc import FlowUniPCMultistepScheduler
-from vitok.naflex_io import postprocess_images
+from vitok.pp.io import postprocess_images
 from safetensors.torch import load_file
 
 

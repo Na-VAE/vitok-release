@@ -115,7 +115,7 @@ def test_postprocess_pipeline(test_tar_path, tmp_path):
     """Test postprocessing pipeline."""
     from vitok.pp import build_transform
     from vitok.data import create_dataloader
-    from vitok.naflex_io import unpatchify, postprocess
+    from vitok.pp.io import unpatchify, postprocess
 
     output_dir = tmp_path / "test_output"
     output_dir.mkdir(parents=True)
