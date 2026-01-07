@@ -300,6 +300,8 @@ class AE(nn.Module):
             x = x[:, self.num_special_tokens:]
 
         z = self.to_code(x)
+        # Apply output normalization (LayerNorm on latent codes)
+        z = self.output_fn(z)
         # Explicitly copy required keys (torch.compile fullgraph compatible)
         encode_dict = {
             'ptype': patch_dict['ptype'],

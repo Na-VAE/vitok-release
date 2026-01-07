@@ -3,6 +3,34 @@
 import os
 
 
+def _remap_legacy_keys(state_dict: dict) -> dict:
+    """Remap legacy checkpoint keys to current model keys.
+
+    Handles:
+    - torch.compile prefix: _orig_mod.X -> X
+    - vitokv2 naming: encoder.X -> encoder_blocks.X, decoder.X -> decoder_blocks.X
+    """
+    remapped = {}
+    for k, v in state_dict.items():
+        new_key = k
+
+        # Strip torch.compile prefix
+        if new_key.startswith("_orig_mod."):
+            new_key = new_key[len("_orig_mod."):]
+
+        # Remap encoder.X -> encoder_blocks.X (but not encoder_embed, etc.)
+        if new_key.startswith("encoder.") and len(new_key) > 8 and new_key[8].isdigit():
+            new_key = "encoder_blocks." + new_key[8:]
+
+        # Remap decoder.X -> decoder_blocks.X (but not decoder_embed, etc.)
+        if new_key.startswith("decoder.") and len(new_key) > 8 and new_key[8].isdigit():
+            new_key = "decoder_blocks." + new_key[8:]
+
+        remapped[new_key] = v
+
+    return remapped
+
+
 def load_weights(model, checkpoint_path: str, strict: bool = True):
     """Load model weights from a safetensors checkpoint.
 
@@ -14,6 +42,7 @@ def load_weights(model, checkpoint_path: str, strict: bool = True):
     Supports:
         - Direct .safetensors file path
         - Directory containing model.safetensors or ema.safetensors
+        - Legacy vitokv2 checkpoints (automatic key remapping)
     """
     from safetensors.torch import load_file
 
@@ -37,14 +66,15 @@ def load_weights(model, checkpoint_path: str, strict: bool = True):
 
     print(f"Loading weights from: {resolved_path}")
 
+    # Remap legacy keys (handles torch.compile prefix and vitokv2 naming)
+    checkpoint_state = _remap_legacy_keys(checkpoint_state)
+
+    # Check if model uses torch.compile prefix
     model_state = model.state_dict()
-    has_orig_ckpt = any(k.startswith("_orig_mod.") for k in checkpoint_state.keys())
     has_orig_model = any(k.startswith("_orig_mod.") for k in model_state.keys())
 
-    # Handle torch.compile prefixes
-    if has_orig_ckpt and not has_orig_model:
-        checkpoint_state = {k[len("_orig_mod."):]: v for k, v in checkpoint_state.items()}
-    elif has_orig_model and not has_orig_ckpt:
+    if has_orig_model:
+        # Model is compiled, add prefix back
         checkpoint_state = {"_orig_mod." + k: v for k, v in checkpoint_state.items()}
 
     # Load state dict
