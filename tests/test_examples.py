@@ -56,37 +56,29 @@ def test_create_grid_layout():
     assert grid.getpixel((0, 8)) == (70, 80, 90)
 
 
-def test_train_vae_compute_loss_mask_and_kl():
+def test_train_vae_compute_loss_mask():
     train_vae = load_example_module("train_vae")
 
-    class DummyPosterior:
-        def __init__(self, value):
-            self._value = value
-
-        def kl(self):
-            return self._value
-
     class DummyModel:
-        def __init__(self, pred_patches, posterior):
+        def __init__(self, pred_patches):
             self._pred_patches = pred_patches
-            self._posterior = posterior
 
-        def __call__(self, batch, sample_posterior=True):
+        def __call__(self, batch):
             return {
                 "patches": self._pred_patches,
-                "posterior": self._posterior,
             }
 
     pred = torch.tensor([[[2.0], [1.0]]])
     target = torch.tensor([[[1.0], [3.0]]])
-    ptype = torch.tensor([[True, False]])
-    batch = {"patches": target, "ptype": ptype}
+    patch_mask = torch.tensor([[True, False]])
+    batch = {"patches": target, "patch_mask": patch_mask}
 
-    posterior = DummyPosterior(torch.tensor([2.0]))
-    model = DummyModel(pred, posterior)
+    model = DummyModel(pred)
 
-    losses = train_vae.compute_loss(model, batch, kl_weight=0.5)
+    losses = train_vae.compute_loss(model, batch)
 
+    # Only first element is valid (mask=[True, False])
+    # recon_loss = |2.0 - 1.0| / 1 = 1.0
     assert losses["recon_loss"] == pytest.approx(1.0)
-    assert losses["kl_loss"] == pytest.approx(2.0)
-    assert losses["loss"] == pytest.approx(2.0)
+    assert losses["kl_loss"] == pytest.approx(0.0)
+    assert losses["loss"] == pytest.approx(1.0)

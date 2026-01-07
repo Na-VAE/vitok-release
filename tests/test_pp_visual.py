@@ -13,7 +13,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 from vitok.pp import build_transform
 from vitok.data import patch_collate_fn
-from vitok.naflex_io import preprocess_images, postprocess_images, unpatchify
+from vitok.naflex_io import preprocess, postprocess, unpatchify
 
 
 OUTPUT_DIR = Path(__file__).parent / "test_outputs"
@@ -298,7 +298,7 @@ class TestVisualBatching:
         selected = [images["01_landscape"], images["02_portrait"], images["04_small"]]
 
         # Process batch
-        batch = preprocess_images(
+        batch = preprocess(
             selected,
             pp="to_tensor|normalize(minus_one_to_one)|patchify(512, 16, 256)",
             device="cpu"

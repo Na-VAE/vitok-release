@@ -60,11 +60,11 @@ def create_test_naflex_batch(batch_size: int = 2, seq_len: int = 64, patch_size:
 
     return {
         'patches': patches,
-        'ptype': ptype,
-        'yidx': yidx,
-        'xidx': xidx,
-        'original_height': original_height,
-        'original_width': original_width,
+        'patch_mask': ptype,
+        'row_idx': yidx,
+        'col_idx': xidx,
+        'orig_height': original_height,
+        'orig_width': original_width,
         'attention_mask': None,
     }
 
@@ -98,7 +98,7 @@ def test_ae_weight_compatibility():
 
     # Import release version
     from vitok.models.ae import AE as Release_AE
-    from vitok.configs.variant_parser import decode_ae_variant as release_decode
+    from vitok.ae import decode_variant as release_decode
 
     # Use a small variant for faster testing
     variant = "Bd2-Bd4/1x16x32"

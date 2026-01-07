@@ -14,9 +14,9 @@ import pytest
 import torch
 from PIL import Image
 
-from vitok.pp import Registry, build_transform, parse_op
+from vitok.pp import OPS, build_transform, parse_op
 from vitok.data import create_dataloader, patch_collate_fn
-from vitok.naflex_io import preprocess_images, postprocess_images, unpatchify
+from vitok.naflex_io import preprocess, postprocess, unpatchify
 
 
 # =============================================================================
@@ -111,7 +111,7 @@ class TestParseOp:
         assert args == (256,)
 
     def test_op_with_multiple_args(self):
-        name, args, kwargs = parse_op("patchify(512, 16, 256)")
+        name, args, kwargs = parse_op("patchify(256, 16)")
         assert name == "patchify"
         assert args == (512, 16, 256)
 
@@ -132,28 +132,27 @@ class TestParseOp:
             parse_op("")
 
 
-class TestRegistry:
-    """Tests for the op registry."""
+class TestOPS:
+    """Tests for the OPS dict."""
 
     def test_all_core_ops_registered(self):
-        ops = Registry.list_ops()
         expected = ["center_crop", "flip", "normalize", "patchify", "random_resized_crop", "to_tensor"]
         for op in expected:
-            assert op in ops, f"Missing core op: {op}"
+            assert op in OPS, f"Missing core op: {op}"
 
     def test_custom_op_registration(self):
-        @Registry.register("_test_invert")
-        def get_invert():
+        def invert():
             def _invert(img):
                 return Image.fromarray(255 - np.array(img))
             return _invert
 
+        OPS["_test_invert"] = invert
         transform = build_transform("_test_invert")
         img = Image.fromarray(np.zeros((10, 10, 3), dtype=np.uint8))
         result = transform(img)
         assert np.array(result).mean() == 255
 
-        del Registry._ops["_test_invert"]
+        del OPS["_test_invert"]
 
 
 # =============================================================================
@@ -257,12 +256,12 @@ class TestPatchifyNaFlex:
     """Test patchify op which handles NaFlex variable resolution."""
 
     def test_patchify_output_keys(self, real_images):
-        transform = build_transform("to_tensor|normalize(minus_one_to_one)|patchify(512, 16, 256)")
+        transform = build_transform("to_tensor|normalize(minus_one_to_one)|patchify(256, 16)")
         result = transform(real_images["landscape"])
 
         expected_keys = [
-            "patches", "ptype", "yidx", "xidx", "tidx",
-            "original_height", "original_width", "grid_h", "grid_w", "attention_mask"
+            "patches", "patch_mask", "row_idx", "col_idx", "time_idx",
+            "orig_height", "orig_width", "grid_rows", "grid_cols", "attention_mask"
         ]
         for key in expected_keys:
             assert key in result, f"Missing key: {key}"
@@ -270,61 +269,61 @@ class TestPatchifyNaFlex:
     def test_patchify_shapes(self, real_images):
         patch_size = 16
         max_tokens = 256
-        transform = build_transform(f"to_tensor|normalize(minus_one_to_one)|patchify(512, {patch_size}, {max_tokens})")
+        transform = build_transform(f"to_tensor|normalize(minus_one_to_one)|patchify({max_tokens}, {patch_size})")
         result = transform(real_images["landscape"])
 
         assert result["patches"].shape == (max_tokens, patch_size * patch_size * 3)
-        assert result["ptype"].shape == (max_tokens,)
-        assert result["yidx"].shape == (max_tokens,)
-        assert result["xidx"].shape == (max_tokens,)
+        assert result["patch_mask"].shape == (max_tokens,)
+        assert result["row_idx"].shape == (max_tokens,)
+        assert result["col_idx"].shape == (max_tokens,)
         assert result["attention_mask"].shape == (max_tokens, max_tokens)
 
     def test_patchify_respects_token_budget(self, real_images):
         """Large images should be resized to fit token budget."""
         max_tokens = 64
-        transform = build_transform(f"to_tensor|normalize(minus_one_to_one)|patchify(512, 16, {max_tokens})")
+        transform = build_transform(f"to_tensor|normalize(minus_one_to_one)|patchify({max_tokens}, 16)")
 
         result = transform(real_images["large"])  # 1920x1080
-        n_valid = result["ptype"].sum().item()
+        n_valid = result["patch_mask"].sum().item()
         assert n_valid <= max_tokens, f"Exceeded token budget: {n_valid} > {max_tokens}"
 
     def test_patchify_respects_max_grid_size(self, real_images):
         """Grid dimensions should not exceed max_grid_size."""
         max_grid = 4
         transform = build_transform(
-            "to_tensor|normalize(minus_one_to_one)|patchify(512, 16, 1024, max_grid_size=4)"
+            "to_tensor|normalize(minus_one_to_one)|patchify(1024, 16, max_grid_size=4)"
         )
         result = transform(real_images["large"])
 
-        grid_h = result["grid_h"].item()
-        grid_w = result["grid_w"].item()
-        n_valid = result["ptype"].sum().item()
+        grid_rows = result["grid_rows"].item()
+        grid_cols = result["grid_cols"].item()
+        n_valid = result["patch_mask"].sum().item()
 
-        assert grid_h <= max_grid
-        assert grid_w <= max_grid
-        assert grid_h * grid_w == n_valid
+        assert grid_rows <= max_grid
+        assert grid_cols <= max_grid
+        assert grid_rows * grid_cols == n_valid
 
     def test_patchify_grid_consistency(self, real_images):
         """Grid dimensions should match valid patch count."""
-        transform = build_transform("to_tensor|normalize(minus_one_to_one)|patchify(512, 16, 256)")
+        transform = build_transform("to_tensor|normalize(minus_one_to_one)|patchify(256, 16)")
 
         for name, img in real_images.items():
             result = transform(img)
-            grid_h = result["grid_h"].item()
-            grid_w = result["grid_w"].item()
-            n_valid = result["ptype"].sum().item()
-            assert grid_h * grid_w == n_valid, f"Grid mismatch for {name}"
+            grid_rows = result["grid_rows"].item()
+            grid_cols = result["grid_cols"].item()
+            n_valid = result["patch_mask"].sum().item()
+            assert grid_rows * grid_cols == n_valid, f"Grid mismatch for {name}"
 
     def test_patchify_attention_mask(self, real_images):
         """Attention mask should only connect valid patches."""
-        transform = build_transform("to_tensor|normalize(minus_one_to_one)|patchify(512, 16, 256)")
+        transform = build_transform("to_tensor|normalize(minus_one_to_one)|patchify(256, 16)")
         result = transform(real_images["landscape"])
 
-        ptype = result["ptype"]
+        patch_mask = result["patch_mask"]
         attn = result["attention_mask"]
 
         # Valid patches should attend to each other
-        n_valid = ptype.sum().item()
+        n_valid = patch_mask.sum().item()
         valid_block = attn[:n_valid, :n_valid]
         assert valid_block.all(), "Valid patches should attend to each other"
 
@@ -335,35 +334,35 @@ class TestPatchifyNaFlex:
 
     def test_patchify_spatial_indices(self, real_images):
         """Spatial indices should form a valid grid."""
-        transform = build_transform("to_tensor|normalize(minus_one_to_one)|patchify(512, 16, 256)")
+        transform = build_transform("to_tensor|normalize(minus_one_to_one)|patchify(256, 16)")
         result = transform(real_images["square"])
 
-        ptype = result["ptype"]
-        yidx = result["yidx"][ptype]
-        xidx = result["xidx"][ptype]
+        patch_mask = result["patch_mask"]
+        row_idx = result["row_idx"][patch_mask]
+        col_idx = result["col_idx"][patch_mask]
 
-        grid_h = result["grid_h"].item()
-        grid_w = result["grid_w"].item()
+        grid_rows = result["grid_rows"].item()
+        grid_cols = result["grid_cols"].item()
 
         # All indices should be valid
-        assert yidx.max() < grid_h
-        assert xidx.max() < grid_w
-        assert yidx.min() >= 0
-        assert xidx.min() >= 0
+        assert row_idx.max() < grid_rows
+        assert col_idx.max() < grid_cols
+        assert row_idx.min() >= 0
+        assert col_idx.min() >= 0
 
     def test_patchify_different_sizes(self, real_images):
         """Test patchify handles different image sizes correctly."""
-        transform = build_transform("to_tensor|normalize(minus_one_to_one)|patchify(512, 16, 256)")
+        transform = build_transform("to_tensor|normalize(minus_one_to_one)|patchify(256, 16)")
 
         results = {}
         for name, img in real_images.items():
             result = transform(img)
             results[name] = {
-                "n_valid": result["ptype"].sum().item(),
-                "grid_h": result["grid_h"].item(),
-                "grid_w": result["grid_w"].item(),
-                "orig_h": result["original_height"].item(),
-                "orig_w": result["original_width"].item(),
+                "n_valid": result["patch_mask"].sum().item(),
+                "grid_rows": result["grid_rows"].item(),
+                "grid_cols": result["grid_cols"].item(),
+                "orig_h": result["orig_height"].item(),
+                "orig_w": result["orig_width"].item(),
             }
 
         # Large image should have fewer tokens due to budget
@@ -383,7 +382,7 @@ class TestNaFlexRoundtrip:
 
     def test_unpatchify_basic(self, real_images):
         """Test unpatchify reconstructs image shape."""
-        transform = build_transform("to_tensor|normalize(minus_one_to_one)|patchify(512, 16, 256)")
+        transform = build_transform("to_tensor|normalize(minus_one_to_one)|patchify(256, 16)")
         patch_dict = transform(real_images["landscape"])
 
         # Add batch dimension
@@ -396,7 +395,7 @@ class TestNaFlexRoundtrip:
 
     def test_roundtrip_preserves_content(self, real_images):
         """Roundtrip should preserve image content."""
-        transform = build_transform("to_tensor|normalize(minus_one_to_one)|patchify(256, 16, 256)")
+        transform = build_transform("to_tensor|normalize(minus_one_to_one)|patchify(256, 16)")
         img = real_images["square"]  # 512x512 -> fits exactly
 
         patch_dict = transform(img)
@@ -409,8 +408,8 @@ class TestNaFlexRoundtrip:
         # Need to resize to match what patchify did
         from torchvision.transforms.functional import resize
         orig_tensor = tensor_transform(img)
-        orig_h = patch_dict["original_height"].item()
-        orig_w = patch_dict["original_width"].item()
+        orig_h = patch_dict["orig_height"].item()
+        orig_w = patch_dict["orig_width"].item()
         orig_tensor = resize(orig_tensor, [orig_h, orig_w])
 
         # Compare valid region
@@ -420,34 +419,34 @@ class TestNaFlexRoundtrip:
         diff = (recon_crop - orig_tensor).abs().max().item()
         assert diff < 1e-5, f"Roundtrip error too large: {diff}"
 
-    def test_postprocess_images_unpack(self, real_images):
-        """Test postprocess_images with unpack=True."""
-        transform = build_transform("to_tensor|normalize(minus_one_to_one)|patchify(512, 16, 256)")
+    def test_postprocess_unpack(self, real_images):
+        """Test postprocess with unpack=True."""
+        transform = build_transform("to_tensor|normalize(minus_one_to_one)|patchify(256, 16)")
 
         patch_dicts = [transform(img) for img in [real_images["landscape"], real_images["portrait"]]]
         batch = patch_collate_fn([(d, 0) for d in patch_dicts])[0]
 
         # Postprocess with unpack
-        images = postprocess_images(batch, output_format="zero_to_one", unpack=True, patch=16)
+        images = postprocess(batch, output_format="zero_to_one", unpack=True, patch=16)
 
         assert isinstance(images, list)
         assert len(images) == 2
 
         # Each image should have original dimensions
         for i, img in enumerate(images):
-            orig_h = batch["original_height"][i].item()
-            orig_w = batch["original_width"][i].item()
+            orig_h = batch["orig_height"][i].item()
+            orig_w = batch["orig_width"][i].item()
             assert img.shape[1] == orig_h
             assert img.shape[2] == orig_w
 
     def test_postprocess_format_conversion(self, real_images):
         """Test format conversion in postprocess."""
-        transform = build_transform("to_tensor|normalize(minus_one_to_one)|patchify(512, 16, 256)")
+        transform = build_transform("to_tensor|normalize(minus_one_to_one)|patchify(256, 16)")
         patch_dict = transform(real_images["landscape"])
         batch = {k: v.unsqueeze(0) for k, v in patch_dict.items()}
 
         # Convert to 0-255
-        result = postprocess_images(
+        result = postprocess(
             batch,
             output_format="0_255",
             current_format="minus_one_to_one",
@@ -464,26 +463,26 @@ class TestNaFlexRoundtrip:
         patch = 1
         patch_dict = {
             "patches": torch.zeros(1, 1, 3),
-            "ptype": torch.tensor([[True]]),
-            "yidx": torch.tensor([[0]]),
-            "xidx": torch.tensor([[0]]),
+            "patch_mask": torch.tensor([[True]]),
+            "row_idx": torch.tensor([[0]]),
+            "col_idx": torch.tensor([[0]]),
         }
         with pytest.raises(ValueError):
-            postprocess_images(patch_dict, unpack=True, patch=patch)
+            postprocess(patch_dict, unpack=True, patch=patch)
 
 
 # =============================================================================
-# Test preprocess_images High-Level API
+# Test preprocess High-Level API
 # =============================================================================
 
 
 class TestPreprocessImages:
-    """Test the high-level preprocess_images function."""
+    """Test the high-level preprocess function."""
 
     def test_single_image(self, real_images):
-        batch = preprocess_images(
+        batch = preprocess(
             real_images["landscape"],
-            pp="to_tensor|normalize(minus_one_to_one)|patchify(512, 16, 256)",
+            pp="to_tensor|normalize(minus_one_to_one)|patchify(256, 16)",
             device="cpu"
         )
 
@@ -493,9 +492,9 @@ class TestPreprocessImages:
     def test_multiple_images(self, real_images):
         images = [real_images["landscape"], real_images["portrait"], real_images["square"]]
 
-        batch = preprocess_images(
+        batch = preprocess(
             images,
-            pp="to_tensor|normalize(minus_one_to_one)|patchify(512, 16, 256)",
+            pp="to_tensor|normalize(minus_one_to_one)|patchify(256, 16)",
             device="cpu"
         )
 
@@ -507,9 +506,9 @@ class TestPreprocessImages:
         img = real_images["landscape"]
         tensor = torch.from_numpy(np.array(img)).permute(2, 0, 1).float() / 127.5 - 1.0
 
-        batch = preprocess_images(
+        batch = preprocess(
             tensor,
-            pp="to_tensor|normalize(minus_one_to_one)|patchify(512, 16, 256)",
+            pp="to_tensor|normalize(minus_one_to_one)|patchify(256, 16)",
             device="cpu"
         )
 
@@ -528,7 +527,7 @@ class TestWebDatasetIntegration:
         """Test loading from local tar file."""
         loader = create_dataloader(
             source=str(webdataset_tar),
-            pp="center_crop(256)|to_tensor|normalize(minus_one_to_one)|patchify(256, 16, 256)",
+            pp="center_crop(256)|to_tensor|normalize(minus_one_to_one)|patchify(256, 16)",
             batch_size=2,
             num_workers=0,
             seed=42,
@@ -546,7 +545,7 @@ class TestWebDatasetIntegration:
         """Test that labels are correctly extracted."""
         loader = create_dataloader(
             source=str(webdataset_tar),
-            pp="center_crop(256)|to_tensor|normalize(minus_one_to_one)|patchify(256, 16, 256)",
+            pp="center_crop(256)|to_tensor|normalize(minus_one_to_one)|patchify(256, 16)",
             batch_size=3,
             num_workers=0,
             seed=42,
@@ -562,7 +561,7 @@ class TestWebDatasetIntegration:
         """Test NaFlex variable resolution with WebDataset."""
         loader = create_dataloader(
             source=str(webdataset_tar),
-            pp="to_tensor|normalize(minus_one_to_one)|patchify(512, 16, 256)",
+            pp="to_tensor|normalize(minus_one_to_one)|patchify(256, 16)",
             batch_size=2,
             num_workers=0,
             seed=42,
@@ -571,15 +570,15 @@ class TestWebDatasetIntegration:
         batch, _ = next(iter(loader))
 
         # Different images should have different valid patch counts
-        ptype = batch["ptype"]
-        valid_counts = ptype.sum(dim=1)
+        patch_mask = batch["patch_mask"]
+        valid_counts = patch_mask.sum(dim=1)
 
         # All should be <= max_tokens
         assert (valid_counts <= 256).all()
 
     def test_patch_collate_fn_batching(self, real_images):
         """Test that collate function properly batches variable-sized patch dicts."""
-        transform = build_transform("to_tensor|normalize(minus_one_to_one)|patchify(512, 16, 256)")
+        transform = build_transform("to_tensor|normalize(minus_one_to_one)|patchify(256, 16)")
 
         # Create patch dicts with different valid counts
         dicts = [
@@ -594,7 +593,7 @@ class TestWebDatasetIntegration:
         assert labels.tolist() == [0, 1, 2]
 
         # Each should have different valid counts
-        valid_counts = batch["ptype"].sum(dim=1).tolist()
+        valid_counts = batch["patch_mask"].sum(dim=1).tolist()
         assert len(set(valid_counts)) > 1, "Expected different valid counts"
 
 
@@ -637,7 +636,7 @@ class TestTrainingPipeline:
         """Simulate a training iteration with the new pipeline."""
         loader = create_dataloader(
             source=str(webdataset_tar),
-            pp="random_resized_crop(256)|flip|to_tensor|normalize(minus_one_to_one)|patchify(256, 16, 256)",
+            pp="random_resized_crop(256)|flip|to_tensor|normalize(minus_one_to_one)|patchify(256, 16)",
             batch_size=2,
             num_workers=0,
             seed=42,
@@ -651,7 +650,7 @@ class TestTrainingPipeline:
 
             # Verify batch structure
             assert batch["patches"].shape == (2, 256, 768)
-            assert batch["ptype"].shape == (2, 256)
+            assert batch["patch_mask"].shape == (2, 256)
             assert batch["attention_mask"].shape == (2, 256, 256)
 
             # Simulate forward pass - just verify we can do math
@@ -662,9 +661,9 @@ class TestTrainingPipeline:
     def test_inference_pipeline(self, real_images):
         """Test inference pipeline produces valid output."""
         # Preprocess
-        batch = preprocess_images(
+        batch = preprocess(
             [real_images["landscape"], real_images["portrait"]],
-            pp="to_tensor|normalize(minus_one_to_one)|patchify(512, 16, 256)",
+            pp="to_tensor|normalize(minus_one_to_one)|patchify(256, 16)",
             device="cpu"
         )
 
@@ -672,7 +671,7 @@ class TestTrainingPipeline:
         fake_output = batch.copy()
 
         # Postprocess
-        images = postprocess_images(
+        images = postprocess(
             fake_output,
             output_format="zero_to_one",
             current_format="minus_one_to_one",

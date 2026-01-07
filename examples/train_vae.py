@@ -32,38 +32,30 @@ import torch.nn.functional as F
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
 
-from vitok import AEConfig, create_ae, load_ae
+from vitok import create_ae, load_ae
 from vitok.data import create_dataloader
 from vitok.naflex_io import unpatchify
 
 
 def compute_loss(model, batch, kl_weight=1e-6):
-    """Compute reconstruction + KL loss."""
+    """Compute reconstruction loss."""
     # Forward pass
-    output = model(batch, sample_posterior=True)
+    output = model(batch)
 
     # Reconstruction loss (L1)
     pred_patches = output['patches']
     target_patches = batch['patches']
-    ptype = batch['ptype']
+    patch_mask = batch['patch_mask']
 
     # Mask out padding
-    mask = ptype.unsqueeze(-1).float()
+    mask = patch_mask.unsqueeze(-1).float()
     recon_loss = F.l1_loss(pred_patches * mask, target_patches * mask, reduction='sum')
     recon_loss = recon_loss / mask.sum()
 
-    # KL loss (if variational)
-    kl_loss = torch.tensor(0.0, device=pred_patches.device)
-    if hasattr(output.get('posterior', None), 'kl'):
-        kl = output['posterior'].kl()
-        kl_loss = kl.mean()
-
-    total_loss = recon_loss + kl_weight * kl_loss
-
     return {
-        'loss': total_loss,
+        'loss': recon_loss,
         'recon_loss': recon_loss,
-        'kl_loss': kl_loss,
+        'kl_loss': torch.tensor(0.0, device=pred_patches.device),
     }
 
 
@@ -102,7 +94,6 @@ def main():
     # Model
     parser.add_argument("--variant", type=str, default="Ld2-Ld22/1x16x64",
                         help="AE variant (e.g., B/1x16x64, Ld2-Ld22/1x16x64)")
-    parser.add_argument("--variational", action="store_true", help="Use variational AE")
     parser.add_argument("--checkpoint", type=str, default=None, help="Resume from checkpoint")
 
     # Training
@@ -135,11 +126,7 @@ def main():
 
     # Create model
     print(f"Creating AE model: {args.variant}")
-    config = AEConfig(
-        variant=args.variant,
-        variational=args.variational,
-    )
-    model = create_ae(config)
+    model = create_ae(args.variant)
     model.to(device=device, dtype=dtype)
     model.train()
 
@@ -158,7 +145,7 @@ def main():
         f"flip|"
         f"to_tensor|"
         f"normalize(minus_one_to_one)|"
-        f"patchify({args.max_size}, {args.patch_size}, {args.max_tokens})"
+        f"patchify({args.max_tokens}, {args.patch_size})"
     )
     print(f"Preprocessing: {pp_string}")
 

@@ -108,9 +108,8 @@ class AE(nn.Module):
         encoder_heads=12,
         decoder_heads=12,
         mlp_factor=2.67,
-        variational=False,
-        encoder_output_fn = 'layernorm',
-        decoder_output_fn = 'none',
+        encoder_output_fn='layernorm',
+        decoder_output_fn='none',
         checkpoint: int = 0,
         spatial_stride: int = 16,
         temporal_stride: int = 1,
@@ -152,7 +151,6 @@ class AE(nn.Module):
         self.encoder_heads = encoder_heads
         self.decoder_heads = decoder_heads
         self.decoder_output_fn = decoder_output_fn
-        self.variational = variational
         self.checkpoint = checkpoint
         self.spatial_stride = spatial_stride
         self.class_token = class_token
@@ -174,10 +172,7 @@ class AE(nn.Module):
 
             self.patch_embed = nn.Linear(self.pixels_per_token, self.encoder_width)
 
-            self.to_code = nn.Linear(
-                encoder_width,
-                channels_per_token * 2 if variational else channels_per_token,
-            )
+            self.to_code = nn.Linear(encoder_width, channels_per_token)
 
             blocks = []
             for layer_idx in range(encoder_depth):
@@ -255,9 +250,12 @@ class AE(nn.Module):
         device: torch.device,
         batch_size: int,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        yidx = patch_dict['yidx'].to(device=device, dtype=torch.float32)
-        xidx = patch_dict['xidx'].to(device=device, dtype=torch.float32)
-        freqs_cos, freqs_sin = compute_2d_freqs_cis(yidx, xidx, head_dim, self.rope_theta)
+        # Support both old (yidx/xidx) and new (row_idx/col_idx) key names
+        row_idx = patch_dict.get('row_idx', patch_dict.get('yidx'))
+        col_idx = patch_dict.get('col_idx', patch_dict.get('xidx'))
+        row_idx = row_idx.to(device=device, dtype=torch.float32)
+        col_idx = col_idx.to(device=device, dtype=torch.float32)
+        freqs_cos, freqs_sin = compute_2d_freqs_cis(row_idx, col_idx, head_dim, self.rope_theta)
         S = self.num_special_tokens
         if S > 0:
             rope_dim = freqs_cos.shape[-1]
@@ -317,8 +315,10 @@ class AE(nn.Module):
         if not self.decoder:
             raise RuntimeError("Cannot call decode() on an encoder-only model")
         
-        assert 'original_height' in encode_dict and 'original_width' in encode_dict, \
-            "AE.decode expects 'original_height' and 'original_width' in posterior_dict"
+        # Support both old (original_height/original_width) and new (orig_height/orig_width) key names
+        has_orig = ('orig_height' in encode_dict and 'orig_width' in encode_dict) or \
+                   ('original_height' in encode_dict and 'original_width' in encode_dict)
+        assert has_orig, "AE.decode expects 'orig_height' and 'orig_width' in encode_dict"
 
         x = self.decoder_embed(encode_dict['z'])
         B, _, _ = x.shape
@@ -353,18 +353,23 @@ class AE(nn.Module):
             x = x[:, self.num_special_tokens:]
 
         pred_patches = self.to_pixels(x)
-        decode_dict = encode_dict
-        del decode_dict['z']
+        decode_dict = {k: v for k, v in encode_dict.items() if k != 'z'}
         decode_dict['patches'] = pred_patches
         return decode_dict
 
     def forward(self, x: Dict[str, torch.Tensor]):
-        """Full forward pass: encode, sample, decode."""
-        if self.encoder:
-            x = self.encode(x)
-        elif self.decoder:
-            x = self.decode(x)
-        return x
+        """Full forward pass: encode then decode.
+
+        If encoder+decoder: returns decoded patches dict
+        If encoder-only: returns encode dict with 'z'
+        If decoder-only: expects dict with 'z', returns patches dict
+        """
+        if self.encoder and self.decoder:
+            return self.decode(self.encode(x))
+        elif self.encoder:
+            return self.encode(x)
+        else:  # decoder-only
+            return self.decode(x)
 
     def get_encoder_decoder_param_groups(self) -> Tuple[List[nn.Parameter], List[nn.Parameter], List[nn.Parameter], List[nn.Parameter]]:
         """Return (enc_decay, enc_no_decay, dec_decay, dec_no_decay) parameter groups."""

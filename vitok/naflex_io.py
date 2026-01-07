@@ -7,7 +7,6 @@ from __future__ import annotations
 
 from typing import Dict, List, Optional, Union
 
-import numpy as np
 import torch
 import torch.nn.functional as F
 from PIL import Image
@@ -16,9 +15,9 @@ from vitok.pp import build_transform
 from vitok.data import patch_collate_fn
 
 
-def preprocess_images(
+def preprocess(
     images: Union[Image.Image, List[Image.Image], torch.Tensor, List[torch.Tensor]],
-    pp: str = "to_tensor|normalize(minus_one_to_one)|patchify(512, 16, 256)",
+    pp: str = "to_tensor|normalize(minus_one_to_one)|patchify(256, 16)",
     device: str = "cuda",
 ) -> Dict[str, torch.Tensor]:
     """Preprocess images into the patch dictionary expected by models.
@@ -26,21 +25,21 @@ def preprocess_images(
     Args:
         images: PIL Image(s) or tensor(s)
         pp: Preprocessing string, e.g.:
-            "to_tensor|normalize(minus_one_to_one)|patchify(512, 16, 256)"
+            "to_tensor|normalize(minus_one_to_one)|patchify(256, 16)"
         device: Target device
 
     Returns:
         Batched patch dictionary with keys:
             - patches: [B, N, D] flattened patch pixels
-            - ptype: [B, N] patch type mask
-            - yidx, xidx: [B, N] spatial indices
+            - patch_mask: [B, N] validity mask
+            - row_idx, col_idx: [B, N] spatial indices
             - attention_mask: [B, N, N]
-            - original_height, original_width: [B]
+            - orig_height, orig_width: [B]
 
     Example:
-        patches = preprocess_images(
+        patches = preprocess(
             [img1, img2],
-            pp="to_tensor|normalize(minus_one_to_one)|patchify(512, 16, 256)",
+            pp="to_tensor|normalize(minus_one_to_one)|patchify(256, 16)",
             device="cuda",
         )
     """
@@ -55,34 +54,32 @@ def preprocess_images(
             img = _tensor_to_pil(img)
         patch_dicts.append(transform(img))
 
-    batched_dict = patch_collate_fn([(d, 0) for d in patch_dicts])[0]
+    batched_dict = patch_collate_fn(patch_dicts)
     batched_dict = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in batched_dict.items()}
     return batched_dict
 
 
-def postprocess_images(
+def postprocess(
     output: Union[torch.Tensor, Dict[str, torch.Tensor]],
-    output_format: str = "minus_one_to_one",
     current_format: str = "minus_one_to_one",
-    unpack: bool = True,
+    output_format: str = "0_255",
     patch: int = 16,
-    max_grid_size: Optional[int] = None,
-) -> Union[torch.Tensor, List[torch.Tensor]]:
+    max_grid_size: int = 32,
+) -> torch.Tensor:
     """Postprocess model output into images.
 
     Args:
         output: Image tensor (B,C,H,W) or patch dict with 'patches' or 'images'
+        current_format: Current format of the output (required, no auto-detect)
         output_format: Target format ("minus_one_to_one", "zero_to_one", "0_255")
-        current_format: Current format of the output
-        unpack: Whether to crop to original sizes (requires dict input)
         patch: Patch size for unpatchify
-        max_grid_size: Maximum grid size for unpatchify
+        max_grid_size: Maximum grid size for unpatchify (required)
 
     Returns:
-        Images tensor or list of tensors (if unpack=True)
+        Images tensor (B, C, H, W)
 
     Example:
-        images = postprocess_images(model_output, output_format="0_255")
+        images = postprocess(model_output, current_format="minus_one_to_one", output_format="0_255")
     """
     if isinstance(output, dict):
         if 'images' in output:
@@ -94,60 +91,69 @@ def postprocess_images(
     else:
         images = output
 
-    # Auto-detect format if needed
-    if current_format is None:
-        if images.dtype == torch.uint8:
-            current_format = "0_255"
-        elif images.min() >= -1.5 and images.max() <= 1.5:
-            current_format = "minus_one_to_one"
-        else:
-            current_format = "zero_to_one"
-
     # Convert formats
     images = _convert_format(images, current_format, output_format)
-
-    if unpack and isinstance(output, dict):
-        if 'original_height' not in output or 'original_width' not in output:
-            raise ValueError("unpack=True requires 'original_height' and 'original_width' in output")
-        return _unpack_images(images, output['original_height'], output['original_width'])
-
     return images
+
+
+def unpack(
+    images: torch.Tensor,
+    orig_height: torch.Tensor,
+    orig_width: torch.Tensor,
+) -> List[torch.Tensor]:
+    """Crop images to their original sizes.
+
+    Args:
+        images: Image tensor (B, C, H, W)
+        orig_height: Original heights per image (B,)
+        orig_width: Original widths per image (B,)
+
+    Returns:
+        List of cropped image tensors, one per batch element
+    """
+    if images.ndim == 3:
+        images = images.unsqueeze(0)
+
+    cropped = []
+    for img, h, w in zip(images, orig_height, orig_width):
+        h_val = int(h.item() if isinstance(h, torch.Tensor) else h)
+        w_val = int(w.item() if isinstance(w, torch.Tensor) else w)
+        cropped.append(img[:, :h_val, :w_val])
+    return cropped
 
 
 def unpatchify(
     patch_dict: dict,
     patch: int = 16,
-    max_grid_size: Optional[int] = None,
+    max_grid_size: int = 32,
 ) -> torch.Tensor:
     """Convert patches back to image tensor.
 
     Args:
-        patch_dict: Dictionary with 'patches', 'ptype', 'yidx', 'xidx'
+        patch_dict: Dictionary with 'patches', 'patch_mask', 'row_idx', 'col_idx'
         patch: Patch size
-        max_grid_size: Optional max grid size
+        max_grid_size: Maximum grid size (required)
 
     Returns:
         Image tensor (B, C, H, W)
     """
     patches = patch_dict['patches']
-    ptype = patch_dict['ptype']
-    yidx = patch_dict['yidx']
-    xidx = patch_dict['xidx']
+
+    # Support both old and new key names during transition
+    patch_mask = patch_dict.get('patch_mask', patch_dict.get('ptype'))
+    row_idx = patch_dict.get('row_idx', patch_dict.get('yidx'))
+    col_idx = patch_dict.get('col_idx', patch_dict.get('xidx'))
 
     B, N, dim = patches.shape
     C = 3
 
-    valid_mask = ptype.bool()
-    if max_grid_size is None:
-        max_y = yidx[valid_mask].max().item() + 1
-        max_x = xidx[valid_mask].max().item() + 1
-    else:
-        max_y = max_grid_size
-        max_x = max_grid_size
+    valid_mask = patch_mask.bool()
+    max_y = max_grid_size
+    max_x = max_grid_size
 
-    patches = patches.masked_fill(~ptype.unsqueeze(-1), 0.0)
+    patches = patches.masked_fill(~patch_mask.unsqueeze(-1), 0.0)
     patches = patches.transpose(1, 2)
-    flat_idx = yidx * max_x + xidx
+    flat_idx = row_idx * max_x + col_idx
 
     tokens_dense = torch.zeros(B, C * patch * patch, max_y * max_x,
                                dtype=patches.dtype, device=patches.device)
@@ -194,21 +200,9 @@ def _convert_format(images: torch.Tensor, from_format: str, to_format: str) -> t
     return images
 
 
-def _unpack_images(images: torch.Tensor, orig_h: torch.Tensor, orig_w: torch.Tensor) -> List[torch.Tensor]:
-    """Crop images to their original sizes."""
-    if images.ndim == 3:
-        images = images.unsqueeze(0)
-
-    cropped = []
-    for img, h, w in zip(images, orig_h, orig_w):
-        h_val = int(h.item() if isinstance(h, torch.Tensor) else h)
-        w_val = int(w.item() if isinstance(w, torch.Tensor) else w)
-        cropped.append(img[:, :h_val, :w_val])
-    return cropped
-
-
 __all__ = [
-    "preprocess_images",
-    "postprocess_images",
+    "preprocess",
+    "postprocess",
     "unpatchify",
+    "unpack",
 ]
