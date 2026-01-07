@@ -75,6 +75,7 @@ def test_data_loading(source: str, num_batches: int = 5, batch_size: int = 4):
             batch_size=batch_size,
             num_workers=2,
             seed=42,
+            return_labels=True,
         )
         print(f"    Dataloader created in {time.perf_counter() - t0:.2f}s")
     except Exception as e:

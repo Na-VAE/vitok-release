@@ -23,6 +23,14 @@ from PIL import Image, ImageOps
 from vitok.pp import build_transform
 
 
+def unpack_batch(batch_data):
+    """Extract patch dict from dataloader output.
+
+    Handles both tuple (patch_dict, labels) and plain dict returns.
+    """
+    return batch_data[0] if isinstance(batch_data, tuple) else batch_data
+
+
 def patch_collate_fn(batch):
     """Collate patch dicts into batched tensors."""
     if not batch:
@@ -39,6 +47,36 @@ def patch_collate_fn(batch):
         else:
             collated[k] = items
     return collated
+
+
+def patch_collate_with_labels(batch):
+    """Collate (patch_dict, label) tuples into batched tensors + labels."""
+    if not batch:
+        return {}, torch.empty(0, dtype=torch.long)
+
+    patch_dicts = [item[0] for item in batch]
+    labels = [item[1] for item in batch]
+    collated = patch_collate_fn(patch_dicts)
+
+    if isinstance(labels[0], torch.Tensor):
+        labels = torch.stack(labels, dim=0)
+    else:
+        labels = torch.tensor(labels, dtype=torch.long)
+    return collated, labels
+
+
+def _decode_label(value):
+    """Parse class labels from WebDataset entries."""
+    if isinstance(value, bytes):
+        value = value.decode("utf-8")
+    if isinstance(value, str):
+        value = value.strip()
+        return int(value)
+    if isinstance(value, torch.Tensor):
+        if value.numel() == 1:
+            return int(value.item())
+        return value.to(dtype=torch.long)
+    return int(value)
 
 
 def to_rgb(img: Image.Image) -> Image.Image:
@@ -68,6 +106,7 @@ def create_dataloader(
     seed: int = 0,
     shuffle_buffer: int = 10000,
     min_size: Optional[int] = None,
+    return_labels: bool = False,
 ) -> wds.WebLoader:
     """Create a dataloader from source with preprocessing.
 
@@ -99,18 +138,30 @@ def create_dataloader(
         wds.WebDataset(urls, resampled=True, handler=wds.ignore_and_continue)
         .shuffle(shuffle_buffer, seed=shuffle_seed)
         .decode("pil", handler=wds.ignore_and_continue)
-        .rename(image="jpg;jpeg;png;webp")
-        .map_dict(image=to_rgb)
     )
+
+    if return_labels:
+        dataset = dataset.rename(image="jpg;jpeg;png;webp", label="cls;cls.txt")
+        dataset = dataset.map_dict(image=to_rgb, label=_decode_label)
+    else:
+        dataset = dataset.rename(image="jpg;jpeg;png;webp")
+        dataset = dataset.map_dict(image=to_rgb)
 
     if min_size is not None:
         dataset = dataset.select(lambda s: min(s["image"].size) >= min_size)
 
-    dataset = (
-        dataset
-        .map(lambda s: transform(s["image"]))
-        .batched(batch_size, partial=False, collation_fn=patch_collate_fn)
-    )
+    if return_labels:
+        dataset = (
+            dataset
+            .map(lambda s: (transform(s["image"]), s["label"]))
+            .batched(batch_size, partial=False, collation_fn=patch_collate_with_labels)
+        )
+    else:
+        dataset = (
+            dataset
+            .map(lambda s: transform(s["image"]))
+            .batched(batch_size, partial=False, collation_fn=patch_collate_fn)
+        )
 
     return wds.WebLoader(
         dataset,
@@ -178,6 +229,11 @@ def _hf_to_urls(source: str, seed: int = 0) -> list[str]:
     return [f"pipe:curl -sL https://huggingface.co/datasets/{repo}/resolve/main/{rel}{auth}"]
 
 
+def _get_hf_shard_urls(source: str, seed: int = 0) -> list[str]:
+    """Backwards-compatible alias for _hf_to_urls."""
+    return _hf_to_urls(source, seed)
+
+
 def _local_to_urls(source: str, seed: int = 0) -> list[str]:
     """Resolve local path to list of tar files.
 
@@ -204,4 +260,10 @@ def _local_to_urls(source: str, seed: int = 0) -> list[str]:
     return urls
 
 
-__all__ = ["create_dataloader", "patch_collate_fn", "to_rgb"]
+__all__ = [
+    "create_dataloader",
+    "patch_collate_fn",
+    "patch_collate_with_labels",
+    "to_rgb",
+    "unpack_batch",
+]

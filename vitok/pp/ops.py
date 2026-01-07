@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import math
 import random
-from typing import Sequence, Tuple
+from typing import Callable, Sequence, Tuple
 
 import torch
 import torch.nn.functional as F
@@ -93,20 +93,28 @@ def flip(p: float = 0.5):
 # =============================================================================
 
 
-def identity():
+def identity() -> Callable:
     """No-op transform."""
     def _identity(x):
         return x
     return _identity
 
 
-def random_choice(ops: Sequence[str], probs: Sequence[float]):
+def random_choice(ops: Sequence[str], probs: Sequence[float]) -> Callable:
     """Randomly apply one of several ops.
 
     Args:
         ops: Sequence of op spec strings (e.g., ['random_resized_crop(256)', 'identity'])
         probs: Probability weights (same length as ops)
+
+    Raises:
+        ValueError: If ops/probs are empty or have mismatched lengths
     """
+    if not ops:
+        raise ValueError("ops cannot be empty")
+    if len(ops) != len(probs):
+        raise ValueError(f"ops and probs must have same length: {len(ops)} != {len(probs)}")
+
     from vitok.pp.registry import parse_op
 
     resolved = []
@@ -179,6 +187,14 @@ def _fit_to_token_budget(
         new_h_p = min(new_h_p, max_grid_size)
         new_w_p = min(new_w_p, max_grid_size)
 
+    while new_h_p * new_w_p > max_tokens:
+        if new_h_p >= new_w_p and new_h_p > 1:
+            new_h_p -= 1
+        elif new_w_p > 1:
+            new_w_p -= 1
+        else:
+            break
+
     new_h = min(new_h_p * patch, h)
     new_w = min(new_w_p * patch, w)
 
@@ -202,8 +218,21 @@ def patchify(
     Input: Tensor (C, H, W) - normalized
     Output: Dict with patches, patch_mask, row_idx, col_idx, attention_mask, etc.
     """
+    max_size = None
+    if max_grid_size is not None and max_tokens < patch and max_grid_size >= patch:
+        # Legacy signature: patchify(max_size, patch, max_tokens)
+        max_size = patch
+        patch, max_tokens, max_grid_size = max_tokens, max_grid_size, None
+
     def _patchify(img: torch.Tensor) -> dict:
         c, h, w = img.shape
+
+        if max_size is not None and max(h, w) > max_size:
+            scale = max_size / max(h, w)
+            new_h = max(1, int(round(h * scale)))
+            new_w = max(1, int(round(w * scale)))
+            img = TF.resize(img, [new_h, new_w], interpolation=TF.InterpolationMode.BICUBIC, antialias=True)
+            h, w = new_h, new_w
 
         # Step 1: Fit to token budget (resize if needed)
         target_h, target_w = _fit_to_token_budget(h, w, patch, max_tokens, max_grid_size)
@@ -267,6 +296,14 @@ def patchify(
             'grid_rows': torch.tensor(grid_rows, dtype=torch.long),
             'grid_cols': torch.tensor(grid_cols, dtype=torch.long),
             'attention_mask': attn_mask,
+            # Backwards-compatible keys
+            'ptype': patch_mask,
+            'yidx': row_idx_full,
+            'xidx': col_idx_full,
+            'original_height': torch.tensor(orig_h, dtype=torch.long),
+            'original_width': torch.tensor(orig_w, dtype=torch.long),
+            'grid_h': torch.tensor(grid_rows, dtype=torch.long),
+            'grid_w': torch.tensor(grid_cols, dtype=torch.long),
         }
 
     return _patchify
