@@ -364,7 +364,7 @@ def test_dit_weight_compatibility():
     torch.manual_seed(42)
     v2_params = v2_decode("Bd4/256")
     # Ensure float8 is disabled for testing (requires torchao)
-    v2_model = V2_DiT(**v2_params, text_dim=1000, code_width=32, float8=False)
+    v2_model = V2_DiT(**v2_params, text_dim=1000, code_width=32, float8_mode="off")
     v2_state = v2_model.state_dict()
     del v2_model
 

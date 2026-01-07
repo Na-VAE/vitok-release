@@ -34,6 +34,7 @@ image = (
     .pip_install(
         "torch>=2.4.0",
         "torchvision>=0.19.0",
+        "torchao>=0.5.0",
         "safetensors>=0.4.0",
         "huggingface_hub>=0.23.0",
         "pillow>=10.0.0",
@@ -100,13 +101,13 @@ def run_inference(model_name: str, image_bytes: bytes | None = None) -> tuple[by
     weights = load_file(weights_path)
 
     # Create encoder-only model
-    encoder = AE(**decode_variant(variant), decoder=False)
+    encoder = AE(**decode_variant(variant), decoder=False, float8_mode="inference")
     encoder.to(device=device, dtype=dtype)
     encoder.load_state_dict(weights, strict=False)
     encoder.eval()
 
     # Create decoder-only model
-    decoder = AE(**decode_variant(variant), encoder=False)
+    decoder = AE(**decode_variant(variant), encoder=False, float8_mode="inference")
     decoder.to(device=device, dtype=dtype)
     decoder.load_state_dict(weights, strict=False)
     decoder.eval()

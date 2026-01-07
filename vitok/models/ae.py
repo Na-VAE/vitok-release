@@ -1,8 +1,10 @@
 """Vision Transformer Autoencoder."""
 
+import warnings
+from typing import Optional, Tuple, Dict, List, Any, Callable
+
 import torch
 import torch.nn as nn
-from typing import Optional, Tuple, Dict, List, Any
 from torch.utils.checkpoint import checkpoint as _checkpoint
 
 from vitok.models.modules.mlp import SwiGLU
@@ -12,9 +14,53 @@ from vitok.models.modules.norm import RMSNorm, LayerNorm
 from vitok.models.modules.rotary_embedding import compute_2d_freqs_cis
 
 try:
-    from torchao.float8 import convert_to_float8_training
-except ImportError:
+    from torchao.float8 import convert_to_float8_training, convert_to_float8_inference
+except Exception:
     convert_to_float8_training = None
+    convert_to_float8_inference = None
+
+_FLOAT8_MODES = {"auto", "off", "train", "inference"}
+
+
+def _normalize_float8_mode(float8_mode: Optional[str], float8: Optional[bool]) -> str:
+    if float8 is not None:
+        warnings.warn(
+            "`float8` is deprecated; use `float8_mode` instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        float8_mode = "train" if float8 else "off"
+    if float8_mode is None:
+        float8_mode = "auto"
+    float8_mode = str(float8_mode).lower()
+    if float8_mode not in _FLOAT8_MODES:
+        modes = ", ".join(sorted(_FLOAT8_MODES))
+        raise ValueError(f"Invalid float8_mode={float8_mode!r}. Use one of: {modes}")
+    return float8_mode
+
+
+def _select_float8_convert_fn(
+    mode: str,
+    training: bool,
+) -> Tuple[str, Optional[Callable[[nn.Module], None]]]:
+    if mode == "off":
+        return "off", None
+    if mode == "auto":
+        preferred = "train" if training else "inference"
+        fallback = "inference" if preferred == "train" else "train"
+        for candidate in (preferred, fallback):
+            if candidate == "train":
+                fn = convert_to_float8_training
+            else:
+                fn = convert_to_float8_inference
+            if fn is not None:
+                return candidate, fn
+        return "off", None
+    if mode == "train":
+        return "train", convert_to_float8_training
+    if mode == "inference":
+        return "inference", convert_to_float8_inference
+    return "off", None
 
 def _make_score_mod(attn_mask: torch.Tensor, num_special: int = 0):
     """Create score_mod from attention mask, handling special tokens inline."""
@@ -116,11 +162,12 @@ class AE(nn.Module):
         use_layer_scale: bool = True,
         layer_scale_init: float = 1e-4,
         drop_path_rate: float = 0.0,
-        float8: bool = False,
+        float8: Optional[bool] = None,
         encoder: bool = True,
         decoder: bool = True,
         sw: Optional[int] = None,
         train_seq_len: Optional[int] = None,
+        float8_mode: Optional[str] = "auto",
         **kwargs,
     ):
         super().__init__()
@@ -152,13 +199,28 @@ class AE(nn.Module):
         self.reg_tokens = reg_tokens
         self.encoder = encoder
         self.decoder = decoder
-        self.float8 = bool(float8)
         self.sw = sw
         self.sw_every = max(1, sw_every)
         self.train_seq_len = train_seq_len
 
         self.num_special_tokens = (1 if class_token else 0) + reg_tokens
         self._block_mask = None
+
+        requested_float8_mode = _normalize_float8_mode(float8_mode, float8)
+        applied_float8_mode, convert_fn = _select_float8_convert_fn(
+            requested_float8_mode,
+            self.training,
+        )
+        if applied_float8_mode == "off" and requested_float8_mode != "off":
+            if requested_float8_mode == "auto":
+                warnings.warn(
+                    "torchao not available; float8 disabled.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+            else:
+                raise ImportError(f"torchao is required for float8 {requested_float8_mode}.")
+        self.float8_mode = applied_float8_mode
 
         # Initialize encoder components
         if encoder:
@@ -185,8 +247,8 @@ class AE(nn.Module):
                     drop_path=0.0,
                     sliding_window=sliding_window,
                 )
-                if self.float8:
-                    convert_to_float8_training(block)
+                if convert_fn is not None:
+                    convert_fn(block)
                 blocks.append(block)
             self.encoder_blocks = nn.ModuleList(blocks)
 
@@ -218,8 +280,8 @@ class AE(nn.Module):
                     drop_path=decoder_dpr[layer_idx],
                     sliding_window=sliding_window,
                 )
-                if self.float8:
-                    convert_to_float8_training(block)
+                if convert_fn is not None:
+                    convert_fn(block)
                 blocks.append(block)
             self.decoder_blocks = nn.ModuleList(blocks)
 
