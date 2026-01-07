@@ -11,10 +11,19 @@ from vitok.models.modules.attention import Attention, create_2d_block_mask
 from vitok.models.modules.norm import RMSNorm, LayerNorm
 from vitok.models.modules.rotary_embedding import compute_2d_freqs_cis
 
-try:
-    from torchao.float8 import convert_to_float8_training
-except ImportError:
-    convert_to_float8_training = None
+from typing import Literal
+
+Float8Mode = Literal["training", "inference"]
+
+
+def _apply_float8(module: nn.Module, mode: Float8Mode) -> None:
+    """Apply float8 conversion to a module."""
+    if mode == "training":
+        from torchao.float8 import convert_to_float8_training
+        convert_to_float8_training(module)
+    else:
+        from torchao.quantization import quantize_, Float8DynamicActivationFloat8WeightConfig
+        quantize_(module, Float8DynamicActivationFloat8WeightConfig())
 
 def _make_score_mod(attn_mask: torch.Tensor, num_special: int = 0):
     """Create score_mod from attention mask, handling special tokens inline."""
@@ -116,7 +125,7 @@ class AE(nn.Module):
         use_layer_scale: bool = True,
         layer_scale_init: float = 1e-4,
         drop_path_rate: float = 0.0,
-        float8: bool = False,
+        float8_mode: Optional[Float8Mode] = None,
         encoder: bool = True,
         decoder: bool = True,
         sw: Optional[int] = None,
@@ -152,7 +161,7 @@ class AE(nn.Module):
         self.reg_tokens = reg_tokens
         self.encoder = encoder
         self.decoder = decoder
-        self.float8 = bool(float8)
+        self.float8_mode = float8_mode
         self.sw = sw
         self.sw_every = max(1, sw_every)
         self.train_seq_len = train_seq_len
@@ -185,8 +194,8 @@ class AE(nn.Module):
                     drop_path=0.0,
                     sliding_window=sliding_window,
                 )
-                if self.float8:
-                    convert_to_float8_training(block)
+                if self.float8_mode:
+                    _apply_float8(block, self.float8_mode)
                 blocks.append(block)
             self.encoder_blocks = nn.ModuleList(blocks)
 
@@ -218,8 +227,8 @@ class AE(nn.Module):
                     drop_path=decoder_dpr[layer_idx],
                     sliding_window=sliding_window,
                 )
-                if self.float8:
-                    convert_to_float8_training(block)
+                if self.float8_mode:
+                    _apply_float8(block, self.float8_mode)
                 blocks.append(block)
             self.decoder_blocks = nn.ModuleList(blocks)
 
