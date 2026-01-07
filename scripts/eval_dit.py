@@ -34,10 +34,10 @@ import torch
 from PIL import Image
 import numpy as np
 
-from vitok import AEConfig, load_ae
-from vitok import DiTConfig, load_dit
+from vitok import AE, decode_variant, DiT, decode_dit_variant
 from vitok.unipc import FlowUniPCMultistepScheduler
-from vitok import postprocess_images
+from vitok.naflex_io import postprocess_images
+from safetensors.torch import load_file
 
 
 # ImageNet class names for common classes
@@ -221,18 +221,20 @@ def main():
 
     # Load models
     print(f"Loading AE from {args.ae_checkpoint}...")
-    ae_config = AEConfig(variant=args.ae_variant, variational=True)
-    ae = load_ae(args.ae_checkpoint, ae_config, device=device, dtype=dtype)
+    ae_params = decode_variant(args.ae_variant)
+    ae = AE(**ae_params)
+    ae.load_state_dict(load_file(args.ae_checkpoint))
+    ae.to(device=device, dtype=dtype)
+    ae.eval()
 
-    code_width = ae.encoder_width if hasattr(ae, 'encoder_width') else 64
+    code_width = ae_params.get('channels_per_token', 64)
 
     print(f"Loading DiT from {args.dit_checkpoint}...")
-    dit_config = DiTConfig(
-        variant=args.dit_variant,
-        code_width=code_width,
-        num_classes=args.num_classes,
-    )
-    dit = load_dit(args.dit_checkpoint, dit_config, device=device, dtype=dtype)
+    dit_params = decode_dit_variant(args.dit_variant)
+    dit = DiT(**dit_params, code_width=code_width, text_dim=args.num_classes)
+    dit.load_state_dict(load_file(args.dit_checkpoint))
+    dit.to(device=device, dtype=dtype)
+    dit.eval()
 
     # Determine classes to generate
     if args.classes:

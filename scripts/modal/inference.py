@@ -38,6 +38,7 @@ image = (
         "huggingface_hub>=0.23.0",
         "pillow>=10.0.0",
         "scikit-image",
+        "webdataset",  # Required by vitok.data import
         "numpy>=1.24.0",
     )
     .add_local_dir("vitok", remote_path="/root/vitok-release/vitok")
@@ -73,7 +74,7 @@ def run_inference(model_name: str, image_bytes: bytes | None = None) -> tuple[by
     sys.path.insert(0, "/root/vitok-release")
 
     from vitok import AE, decode_variant, preprocess, postprocess
-    from vitok.utils.pretrained import download_pretrained, get_pretrained_info, list_pretrained
+    from vitok.pretrained import download_pretrained, get_pretrained_info
 
     # Get model info
     repo_id, filename, variant = get_pretrained_info(model_name)
@@ -183,20 +184,20 @@ def main(
         list_models: List available pretrained models and exit
     """
     if list_models:
-        # Import locally to list models
-        sys.path.insert(0, str(Path(__file__).parent.parent.parent))
-        from vitok.utils.pretrained import list_pretrained, PRETRAINED_ALIASES
-
+        # Define models locally to avoid importing torch
+        aliases = {
+            "L-64": "Ld4-Ld24/1x16x64",
+            "L-32": "Ld4-Ld24/1x32x64",
+            "L-16": "Ld4-Ld24/1x16x16",
+            "T-64": "Td2-Td12/1x16x64",
+            "T-128": "Td2-Td12/1x16x128",
+            "T-256": "Td2-Td12/1x16x256",
+        }
         print("Available pretrained models:")
         print()
         print("Aliases (recommended):")
-        for alias, full_name in sorted(PRETRAINED_ALIASES.items()):
+        for alias, full_name in sorted(aliases.items()):
             print(f"  {alias:10s} -> {full_name}")
-        print()
-        print("Full names:")
-        from vitok.utils.pretrained import PRETRAINED_MODELS
-        for name in sorted(PRETRAINED_MODELS.keys()):
-            print(f"  {name}")
         return
 
     # Read input image if provided

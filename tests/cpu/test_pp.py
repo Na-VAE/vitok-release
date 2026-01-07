@@ -330,28 +330,26 @@ class TestNaFlexRoundtrip:
         assert reconstructed.shape[1] == 3
 
     def test_roundtrip_preserves_content(self, real_images):
-        """Roundtrip should preserve image content."""
-        transform = build_transform("to_tensor|normalize(minus_one_to_one)|patchify(16, 256)")
-        img = real_images["square"]  # 512x512 -> fits exactly
+        """Roundtrip should preserve image content perfectly when no resize needed."""
+        # Use large token budget so no resize is needed (512x512 / 16 = 32x32 = 1024 patches)
+        transform = build_transform("to_tensor|normalize(minus_one_to_one)|patchify(16, 1024)")
+        img = real_images["square"]  # 512x512 -> fits exactly in 1024 tokens
 
         patch_dict = transform(img)
         batch_dict = {k: v.unsqueeze(0) for k, v in patch_dict.items()}
 
         reconstructed = unpatchify(batch_dict, patch=16)
 
-        # Get original tensor for comparison
+        # Get original tensor for comparison (no resize needed)
         tensor_transform = build_transform("to_tensor|normalize(minus_one_to_one)")
-        # Need to resize to match what patchify did
-        from torchvision.transforms.functional import resize
         orig_tensor = tensor_transform(img)
-        orig_h = patch_dict["orig_height"].item()
-        orig_w = patch_dict["orig_width"].item()
-        orig_tensor = resize(orig_tensor, [orig_h, orig_w])
 
         # Compare valid region
+        orig_h = patch_dict["orig_height"].item()
+        orig_w = patch_dict["orig_width"].item()
         recon_crop = reconstructed[0, :, :orig_h, :orig_w]
 
-        # Should be very close (within floating point tolerance)
+        # Should be perfect (within floating point tolerance) - no interpolation involved
         diff = (recon_crop - orig_tensor).abs().max().item()
         assert diff < 1e-5, f"Roundtrip error too large: {diff}"
 
@@ -545,5 +543,5 @@ class TestTrainingPipeline:
 
         assert len(images) == 2
         for img in images:
-            assert img.min() >= 0
-            assert img.max() <= 1
+            assert img.min() >= 0, f"min value {img.min()} should be >= 0"
+            assert img.max() <= 1, f"max value {img.max()} should be <= 1"

@@ -122,26 +122,39 @@ Format: `{encoder}[-{decoder}]/{temporal}x{spatial}x{channels}`
 ## Testing
 
 ```bash
-# Run all tests
-pytest tests/ -v
+# CPU tests (fast, local)
+pytest tests/cpu/ -v
 
 # GPU tests via Modal
-modal run modal_tests/test_all.py
+modal run tests/gpu/test_all.py --quick    # Quick tests (~1 min)
+modal run tests/gpu/test_all.py            # Full tests (~3 min)
+
+# Individual GPU tests
+modal run tests/gpu/test_ae.py
+modal run tests/gpu/test_dit.py
+
+# Benchmarks
+modal run benchmarks/benchmark_mfu.py
 ```
 
 ## Project Structure
 
 ```
-vitok/
-├── vitok/
+vitok-release/
+├── vitok/                    # Core library
 │   ├── ae.py                 # AE, decode_variant
 │   ├── naflex_io.py          # preprocess, postprocess, unpatchify
 │   ├── data.py               # create_dataloader
-│   ├── models/               # AE implementation
+│   ├── models/               # AE, DiT implementations
 │   └── pp/                   # Preprocessing pipeline DSL
-├── scripts/                  # Training scripts (WIP)
-├── tests/                    # Test suite
-└── modal_tests/              # GPU testing infrastructure
+├── scripts/                  # Training and utility scripts
+│   └── modal/                # Modal inference scripts
+├── tests/
+│   ├── cpu/                  # CPU tests (pytest)
+│   ├── gpu/                  # GPU tests (Modal)
+│   ├── visual/               # Visual inspection tests
+│   └── utils/                # Debug utilities
+└── benchmarks/               # Performance benchmarks
 ```
 
 ## License

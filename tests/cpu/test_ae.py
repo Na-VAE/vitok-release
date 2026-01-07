@@ -98,7 +98,7 @@ def test_ae_weight_compatibility():
 
     # Import release version
     from vitok.models.ae import AE as Release_AE
-    from vitok.variant_parser import decode_ae_variant as release_decode
+    from vitok.models.ae import decode_variant as release_decode
 
     # Use a small variant for faster testing
     variant = "Bd2-Bd4/1x16x32"
@@ -154,14 +154,10 @@ def test_ae_weight_compatibility():
 
 def test_ae_encode_decode():
     """Test that AE can encode and decode without errors."""
-    from vitok import AEConfig, create_ae
+    from vitok import AE, decode_variant
 
-    # Create small model - use variational=False for simpler testing
-    config = AEConfig(
-        variant="Bd2-Bd4/1x16x32",
-        variational=False,  # Use non-variational for simpler encode/decode
-    )
-    model = create_ae(config)
+    # Create small model
+    model = AE(**decode_variant("Bd2-Bd4/1x16x32"))
     model.eval()
 
     # Create test input
@@ -200,13 +196,9 @@ def test_ae_encode_decode():
 
 def test_ae_reconstruction():
     """Test that AE can reconstruct input approximately."""
-    from vitok import AEConfig, create_ae
+    from vitok import AE, decode_variant
 
-    config = AEConfig(
-        variant="Bd2-Bd4/1x16x32",
-        variational=False,  # Use deterministic mode
-    )
-    model = create_ae(config)
+    model = AE(**decode_variant("Bd2-Bd4/1x16x32"))
     model.eval()
 
     # Create test input
