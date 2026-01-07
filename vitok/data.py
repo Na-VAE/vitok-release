@@ -79,7 +79,7 @@ def create_dataloader(
             "resize_longest_side(512)|to_tensor|normalize(minus_one_to_one)|patchify(16, 256)"
         batch_size: Batch size
         num_workers: DataLoader workers
-        seed: Random seed
+        seed: Random seed (used for shard assignment, must be same across ranks)
         shuffle_buffer: Shuffle buffer size
         min_size: Optional minimum image dimension filter
 
@@ -89,10 +89,15 @@ def create_dataloader(
     transform = build_transform(pp)
     urls = _resolve_source(source, seed)
 
+    # Per-rank shuffle seed: different ranks get different sample orderings
+    # Even with same seed, ranks process different shards so samples differ
+    rank = dist.get_rank() if dist.is_initialized() else 0
+    shuffle_seed = seed + rank
+
     # Build pipeline
     dataset = (
         wds.WebDataset(urls, resampled=True, handler=wds.ignore_and_continue)
-        .shuffle(shuffle_buffer, seed=seed)
+        .shuffle(shuffle_buffer, seed=shuffle_seed)
         .decode("pil", handler=wds.ignore_and_continue)
         .rename(image="jpg;jpeg;png;webp")
         .map_dict(image=to_rgb)
@@ -127,6 +132,9 @@ def _hf_to_urls(source: str, seed: int = 0) -> list[str]:
     """Convert hf://org/repo/pattern.tar to curl URLs.
 
     Supports brace expansion: hf://org/repo/data-{0000..0099}.tar
+
+    Note: seed should be the SAME across all ranks for consistent shard assignment.
+    The shuffle ensures different epoch orderings when seed changes.
     """
     from huggingface_hub import get_token
 
@@ -152,11 +160,11 @@ def _hf_to_urls(source: str, seed: int = 0) -> list[str]:
             rel = f"{subpath}{num}{suffix}"
             urls.append(f"pipe:curl -sL https://huggingface.co/datasets/{repo}/resolve/main/{rel}{auth}")
 
-        # Shuffle by seed for distributed
+        # Shuffle with SAME seed across all ranks for consistent assignment
         rng = random.Random(seed)
         rng.shuffle(urls)
 
-        # Split by rank
+        # Split by rank - each rank gets non-overlapping shards
         if dist.is_initialized():
             rank, world = dist.get_rank(), dist.get_world_size()
             urls = urls[rank::world]
@@ -171,7 +179,10 @@ def _hf_to_urls(source: str, seed: int = 0) -> list[str]:
 
 
 def _local_to_urls(source: str, seed: int = 0) -> list[str]:
-    """Resolve local path to list of tar files."""
+    """Resolve local path to list of tar files.
+
+    Note: seed should be the SAME across all ranks for consistent shard assignment.
+    """
     path = Path(source)
 
     if "*" in source or "?" in source:
@@ -181,10 +192,11 @@ def _local_to_urls(source: str, seed: int = 0) -> list[str]:
     else:
         urls = [str(path)]
 
-    # Shuffle and split by rank
+    # Shuffle with SAME seed across all ranks for consistent assignment
     rng = random.Random(seed)
     rng.shuffle(urls)
 
+    # Split by rank - each rank gets non-overlapping shards
     if dist.is_initialized():
         rank, world = dist.get_rank(), dist.get_world_size()
         urls = urls[rank::world]
