@@ -16,7 +16,7 @@ from PIL import Image
 
 from vitok.pp import OPS, build_transform, parse_op
 from vitok.data import create_dataloader, patch_collate_fn
-from vitok.naflex_io import preprocess, postprocess, unpatchify
+from vitok.pp.io import preprocess, postprocess, unpatchify
 
 
 # =============================================================================

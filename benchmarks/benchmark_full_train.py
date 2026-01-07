@@ -58,8 +58,9 @@ def benchmark_full_train(
     os.chdir("/code/vitok-release")
 
     import torch
-    from vitok import AEConfig, create_ae
-    from vitok.naflex_io import postprocess_images, RandomTileSampler
+    from vitok import AE, decode_variant
+    from vitok.pp.io import postprocess_images
+    from vitok.pp import sample_tiles
     from torchmetrics.functional.image import structural_similarity_index_measure as SSIM
     from dino_perceptual import DINOPerceptual
 
@@ -71,8 +72,7 @@ def benchmark_full_train(
     print("=" * 60)
 
     # Create model
-    config = AEConfig(variant="Ld2-Ld22/1x16x64")
-    model = create_ae(config)
+    model = AE(**decode_variant("Ld2-Ld22/1x16x64"))
     model.to(device=device, dtype=dtype)
     model = torch.compile(model, fullgraph=True)
     model.train()
@@ -87,15 +87,8 @@ def benchmark_full_train(
     dino_params = sum(p.numel() for p in dino_loss_fn.parameters())
     print(f"DINO model: {dino_params/1e6:.1f}M params")
 
-    tile_sampler = RandomTileSampler(
-        n_tiles=n_tiles,
-        tile_size=(tile_size, tile_size),
-        spatial_stride=16,
-    )
-
     print(f"Batch size: {batch_size}")
     print(f"Max tokens: {max_tokens}")
-    print(f"Tile size: {tile_size}, n_tiles: {n_tiles}")
     print(f"Steps: {n_steps} (warmup: {n_warmup})")
     print()
 
@@ -160,8 +153,18 @@ def benchmark_full_train(
                 patch=16, max_grid_size=max_grid,
             )
 
-        tiles_ref, tile_indices = tile_sampler(ref_images, batch)
-        tiles_pred, _ = tile_sampler(recon_images, batch, indices=tile_indices)
+        # Sample tiles
+        orig_h = batch['original_height']
+        orig_w = batch['original_width']
+        tiles_ref, tile_indices = sample_tiles(
+            ref_images, orig_h, orig_w,
+            n_tiles=n_tiles, tile_size=(tile_size, tile_size)
+        )
+        tiles_pred, _ = sample_tiles(
+            recon_images, orig_h, orig_w,
+            n_tiles=n_tiles, tile_size=(tile_size, tile_size),
+            indices=tile_indices
+        )
 
         B = tiles_ref.shape[0]
         tiles_ref = tiles_ref.reshape(B * n_tiles, 3, tile_size, tile_size)
@@ -281,10 +284,19 @@ def benchmark_full_train(
         torch.cuda.synchronize()
         t_postprocess_total += time.perf_counter() - t0
 
-        # Tile sampling
+        # Sample tiles
         t0 = time.perf_counter()
-        tiles_ref, tile_indices = tile_sampler(ref_images, synthetic_batch)
-        tiles_pred, _ = tile_sampler(recon_images, synthetic_batch, indices=tile_indices)
+        orig_h = synthetic_batch['original_height']
+        orig_w = synthetic_batch['original_width']
+        tiles_ref, tile_indices = sample_tiles(
+            ref_images, orig_h, orig_w,
+            n_tiles=n_tiles, tile_size=(tile_size, tile_size)
+        )
+        tiles_pred, _ = sample_tiles(
+            recon_images, orig_h, orig_w,
+            n_tiles=n_tiles, tile_size=(tile_size, tile_size),
+            indices=tile_indices
+        )
         B = tiles_ref.shape[0]
         tiles_ref = tiles_ref.reshape(B * n_tiles, 3, tile_size, tile_size)
         tiles_pred = tiles_pred.reshape(B * n_tiles, 3, tile_size, tile_size)
