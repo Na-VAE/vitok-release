@@ -60,11 +60,11 @@ def create_test_naflex_batch(batch_size: int = 2, seq_len: int = 64, patch_size:
 
     return {
         'patches': patches,
-        'ptype': ptype,
-        'yidx': yidx,
-        'xidx': xidx,
-        'original_height': original_height,
-        'original_width': original_width,
+        'patch_mask': ptype,
+        'row_idx': yidx,
+        'col_idx': xidx,
+        'orig_height': original_height,
+        'orig_width': original_width,
         'attention_mask': None,
     }
 
@@ -176,11 +176,11 @@ def test_ae_encode_decode():
     # Test decode
     decode_input = {
         'z': z,
-        'ptype': test_input['ptype'],
-        'yidx': test_input['yidx'],
-        'xidx': test_input['xidx'],
-        'original_height': test_input['original_height'],
-        'original_width': test_input['original_width'],
+        'patch_mask': test_input['patch_mask'],
+        'row_idx': test_input['row_idx'],
+        'col_idx': test_input['col_idx'],
+        'orig_height': test_input['orig_height'],
+        'orig_width': test_input['orig_width'],
     }
 
     with torch.no_grad():

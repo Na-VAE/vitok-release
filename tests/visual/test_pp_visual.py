@@ -182,11 +182,11 @@ class TestVisualPatchify:
             result = transform(img)
 
             # Get dimensions
-            orig_h = result["original_height"].item()
-            orig_w = result["original_width"].item()
+            orig_h = result["orig_height"].item()
+            orig_w = result["orig_width"].item()
             grid_h = result["grid_h"].item()
             grid_w = result["grid_w"].item()
-            n_valid = result["ptype"].sum().item()
+            n_valid = result["patch_mask"].sum().item()
 
             # Create visualization
             # First resize original to match patchified size
@@ -218,9 +218,9 @@ class TestVisualPatchify:
             transform = build_transform(f"to_tensor|normalize(minus_one_to_one)|patchify(512, 16, {max_tokens})")
             result = transform(large_img)
 
-            orig_h = result["original_height"].item()
-            orig_w = result["original_width"].item()
-            n_valid = result["ptype"].sum().item()
+            orig_h = result["orig_height"].item()
+            orig_w = result["orig_width"].item()
+            n_valid = result["patch_mask"].sum().item()
 
             # Resize for visualization
             scale = min(800 / orig_w, 600 / orig_h)
@@ -258,9 +258,9 @@ class TestVisualRoundtrip:
             patch_dict = transform(img)
 
             # Info about patchification
-            orig_h = patch_dict["original_height"].item()
-            orig_w = patch_dict["original_width"].item()
-            n_valid = patch_dict["ptype"].sum().item()
+            orig_h = patch_dict["orig_height"].item()
+            orig_w = patch_dict["orig_width"].item()
+            n_valid = patch_dict["patch_mask"].sum().item()
 
             # Reconstruct
             batch = {k: v.unsqueeze(0) for k, v in patch_dict.items()}
@@ -309,9 +309,9 @@ class TestVisualBatching:
             single = {k: v[i:i+1] for k, v in batch.items()}
             recon = unpatchify(single, patch=16)
 
-            orig_h = batch["original_height"][i].item()
-            orig_w = batch["original_width"][i].item()
-            n_valid = batch["ptype"][i].sum().item()
+            orig_h = batch["orig_height"][i].item()
+            orig_w = batch["orig_width"][i].item()
+            n_valid = batch["patch_mask"][i].sum().item()
 
             recon_cropped = recon[0, :, :orig_h, :orig_w]
             recon_viz = (recon_cropped + 1) / 2
@@ -324,8 +324,8 @@ class TestVisualBatching:
             save_image(recon_pil, f"batch_item_{i}")
 
         # Create grid of all
-        max_h = max(batch["original_height"]).item()
-        total_w = sum(batch["original_width"]).item() + 20
+        max_h = max(batch["orig_height"]).item()
+        total_w = sum(batch["orig_width"]).item() + 20
 
         grid = Image.new("RGB", (total_w, max_h + 30), (30, 30, 30))
         x_offset = 0
@@ -334,8 +334,8 @@ class TestVisualBatching:
             single = {k: v[i:i+1] for k, v in batch.items()}
             recon = unpatchify(single, patch=16)
 
-            orig_h = batch["original_height"][i].item()
-            orig_w = batch["original_width"][i].item()
+            orig_h = batch["orig_height"][i].item()
+            orig_w = batch["orig_width"][i].item()
 
             recon_cropped = recon[0, :, :orig_h, :orig_w]
             recon_viz = (recon_cropped + 1) / 2
@@ -395,8 +395,8 @@ class TestVisualPipelines:
             batch = {k: v.unsqueeze(0) for k, v in result.items()}
             recon = unpatchify(batch, patch=16)
 
-            orig_h = result["original_height"].item()
-            orig_w = result["original_width"].item()
+            orig_h = result["orig_height"].item()
+            orig_w = result["orig_width"].item()
 
             recon_cropped = recon[0, :, :orig_h, :orig_w]
             recon_viz = (recon_cropped + 1) / 2

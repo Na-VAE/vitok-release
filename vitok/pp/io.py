@@ -83,8 +83,8 @@ def postprocess(
     images = _convert_format(images, current_format, output_format)
 
     if do_unpack and isinstance(output, dict):
-        orig_h = output.get('orig_height', output.get('original_height'))
-        orig_w = output.get('orig_width', output.get('original_width'))
+        orig_h = output.get('orig_height')
+        orig_w = output.get('orig_width')
         if orig_h is None or orig_w is None:
             raise ValueError("do_unpack=True requires 'orig_height' and 'orig_width' in output")
         return unpack(images, orig_h, orig_w)

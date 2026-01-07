@@ -11,10 +11,19 @@ from vitok.models.modules.mlp import SwiGLU
 from vitok.models.modules.layerscale import LayerScale
 from vitok.models.modules.rotary_embedding import compute_2d_freqs_cis
 
-try:
-    from torchao.float8 import convert_to_float8_training
-except Exception:
-    convert_to_float8_training = None
+from typing import Literal
+
+Float8Mode = Literal["training", "inference"]
+
+
+def _apply_float8(module: nn.Module, mode: Float8Mode) -> None:
+    """Apply float8 conversion to a module."""
+    if mode == "training":
+        from torchao.float8 import convert_to_float8_training
+        convert_to_float8_training(module)
+    else:
+        from torchao.quantization import quantize_, Float8DynamicActivationFloat8WeightConfig
+        quantize_(module, Float8DynamicActivationFloat8WeightConfig())
 
 
 def timestep_embedding(t, dim, max_period=10000, dtype=torch.float32, device=None):
@@ -115,7 +124,7 @@ class DiT(nn.Module):
         num_heads: int = 16,
         num_tokens: int = 256,
         checkpoint: int = 0,
-        float8: bool = False,
+        float8_mode: Optional[Float8Mode] = None,
         use_layer_scale: bool = True,
         layer_scale_init: float = 1e-4,
         sw: Optional[int] = None,
@@ -189,10 +198,8 @@ class DiT(nn.Module):
                 sliding_window=sliding_window,
                 mod_tanh=self.mod_tanh,
             )
-            if float8:
-                if convert_to_float8_training is None:
-                    raise ImportError("torchao is required for float8 training.")
-                convert_to_float8_training(block)
+            if float8_mode:
+                _apply_float8(block, float8_mode)
             blocks.append(block)
         self.blocks = nn.ModuleList(blocks)
 
@@ -218,9 +225,9 @@ class DiT(nn.Module):
         seq_len: int,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Compute 2D RoPE frequencies from positions or infer from sequence length."""
-        if 'yidx' in dit_dict and 'xidx' in dit_dict:
-            yidx = dit_dict['yidx'].to(device=device, dtype=torch.float32)
-            xidx = dit_dict['xidx'].to(device=device, dtype=torch.float32)
+        if 'row_idx' in dit_dict and 'col_idx' in dit_dict:
+            yidx = dit_dict['row_idx'].to(device=device, dtype=torch.float32)
+            xidx = dit_dict['col_idx'].to(device=device, dtype=torch.float32)
             # Handle unbatched positions
             if yidx.ndim == 1:
                 yidx = yidx.unsqueeze(0).expand(batch_size, -1)

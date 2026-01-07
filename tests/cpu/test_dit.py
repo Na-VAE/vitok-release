@@ -80,8 +80,8 @@ class TestDiTForward:
             'z': torch.randn(batch_size, seq_len, code_width),
             't': torch.randint(0, 1000, (batch_size,)).float(),
             'context': torch.randint(0, 1000, (batch_size,)),
-            'yidx': y.flatten().unsqueeze(0).expand(batch_size, -1),
-            'xidx': x.flatten().unsqueeze(0).expand(batch_size, -1),
+            'row_idx': y.flatten().unsqueeze(0).expand(batch_size, -1),
+            'col_idx': x.flatten().unsqueeze(0).expand(batch_size, -1),
         }
 
     def test_forward_basic(self, model, dit_input):
@@ -123,8 +123,8 @@ class TestDiTForward:
                 'z': torch.randn(batch_size, seq_len, code_width),
                 't': torch.randint(0, 1000, (batch_size,)).float(),
                 'context': torch.randint(0, 1000, (batch_size,)),
-                'yidx': y.flatten().unsqueeze(0).expand(batch_size, -1),
-                'xidx': x.flatten().unsqueeze(0).expand(batch_size, -1),
+                'row_idx': y.flatten().unsqueeze(0).expand(batch_size, -1),
+                'col_idx': x.flatten().unsqueeze(0).expand(batch_size, -1),
             }
 
             with torch.no_grad():
@@ -148,8 +148,8 @@ class TestDiTForward:
                 'z': torch.randn(batch_size, seq_len, code_width),
                 't': torch.randint(0, 1000, (batch_size,)).float(),
                 'context': torch.randint(0, 1000, (batch_size,)),
-                'yidx': y.flatten().unsqueeze(0).expand(batch_size, -1),
-                'xidx': x.flatten().unsqueeze(0).expand(batch_size, -1),
+                'row_idx': y.flatten().unsqueeze(0).expand(batch_size, -1),
+                'col_idx': x.flatten().unsqueeze(0).expand(batch_size, -1),
             }
 
             with torch.no_grad():
@@ -221,8 +221,8 @@ class TestDiTCFG:
             'z': z_cfg,
             't': t_cfg,
             'context': context_cfg,
-            'yidx': y.flatten().unsqueeze(0).expand(batch_size * 2, -1),
-            'xidx': x.flatten().unsqueeze(0).expand(batch_size * 2, -1),
+            'row_idx': y.flatten().unsqueeze(0).expand(batch_size * 2, -1),
+            'col_idx': x.flatten().unsqueeze(0).expand(batch_size * 2, -1),
         }
 
         with torch.no_grad():
@@ -363,8 +363,7 @@ def test_dit_weight_compatibility():
     # Get v2 state dict
     torch.manual_seed(42)
     v2_params = v2_decode("Bd4/256")
-    # Ensure float8 is disabled for testing (requires torchao)
-    v2_model = V2_DiT(**v2_params, text_dim=1000, code_width=32, float8=False)
+    v2_model = V2_DiT(**v2_params, text_dim=1000, code_width=32)
     v2_state = v2_model.state_dict()
     del v2_model
 

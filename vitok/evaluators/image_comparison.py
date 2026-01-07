@@ -115,10 +115,10 @@ class Evaluator:
         data_iter = iter(self.dataloader)
         for _ in tqdm(range(self.total_steps), disable=disable_tqdm, desc="Evaluating"):
             try:
-                batch, _ = next(data_iter)
+                batch = next(data_iter)
             except StopIteration:
                 data_iter = iter(self.dataloader)
-                batch, _ = next(data_iter)
+                batch = next(data_iter)
 
             # Move to GPU
             batch = {k: v.to('cuda') if isinstance(v, torch.Tensor) else v
