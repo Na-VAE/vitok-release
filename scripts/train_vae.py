@@ -33,9 +33,9 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed._composable.fsdp import fully_shard, MixedPrecisionPolicy
 from tqdm import tqdm
 
-from vitok import AEConfig, create_ae
+from vitok import create_ae
 from vitok.data import create_dataloader
-from vitok.naflex_io import postprocess_images, RandomTileSampler
+from vitok.naflex_io import postprocess, RandomTileSampler
 from vitok import training_utils as tu
 from vitok.evaluators import MetricCalculator
 
@@ -137,8 +137,7 @@ def main():
     # Create model
     if rank == 0:
         print(f"Creating AE model: {args.variant}")
-    config = AEConfig(variant=args.variant)
-    model = create_ae(config)
+    model = create_ae(args.variant)
     if rank == 0:
         print("[DEBUG] Model created, moving to device...")
     model.to(device=device, dtype=dtype)
@@ -398,12 +397,12 @@ def main():
 
         if args.ssim > 0 or args.dino_perceptual > 0:
             with torch.no_grad():
-                recon_images = postprocess_images(
+                recon_images = postprocess(
                     decode_dict, output_format="minus_one_to_one",
                     current_format="minus_one_to_one", unpack=False,
                     patch=args.patch_size, max_grid_size=max_grid_size,
                 )
-                ref_images = postprocess_images(
+                ref_images = postprocess(
                     batch, output_format="minus_one_to_one",
                     current_format="minus_one_to_one", unpack=False,
                     patch=args.patch_size, max_grid_size=max_grid_size,
@@ -533,12 +532,12 @@ def main():
                     with torch.autocast(device_type='cuda', dtype=dtype):
                         eval_out = model(eval_batch)
 
-                    recon = postprocess_images(
+                    recon = postprocess(
                         eval_out, output_format="minus_one_to_one",
                         current_format="minus_one_to_one", unpack=True,
                         patch=args.patch_size, max_grid_size=max_grid_size,
                     )
-                    ref = postprocess_images(
+                    ref = postprocess(
                         eval_batch, output_format="minus_one_to_one",
                         current_format="minus_one_to_one", unpack=True,
                         patch=args.patch_size, max_grid_size=max_grid_size,

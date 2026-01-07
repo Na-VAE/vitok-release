@@ -7,7 +7,6 @@ from __future__ import annotations
 
 from typing import Dict, List, Optional, Union
 
-import numpy as np
 import torch
 import torch.nn.functional as F
 from PIL import Image
@@ -16,7 +15,7 @@ from vitok.pp import build_transform
 from vitok.data import patch_collate_fn
 
 
-def preprocess_images(
+def preprocess(
     images: Union[Image.Image, List[Image.Image], torch.Tensor, List[torch.Tensor]],
     pp: str = "to_tensor|normalize(minus_one_to_one)|patchify(512, 16, 256)",
     device: str = "cuda",
@@ -38,7 +37,7 @@ def preprocess_images(
             - original_height, original_width: [B]
 
     Example:
-        patches = preprocess_images(
+        patches = preprocess(
             [img1, img2],
             pp="to_tensor|normalize(minus_one_to_one)|patchify(512, 16, 256)",
             device="cuda",
@@ -55,16 +54,16 @@ def preprocess_images(
             img = _tensor_to_pil(img)
         patch_dicts.append(transform(img))
 
-    batched_dict = patch_collate_fn([(d, 0) for d in patch_dicts])[0]
+    batched_dict = patch_collate_fn(patch_dicts)
     batched_dict = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in batched_dict.items()}
     return batched_dict
 
 
-def postprocess_images(
+def postprocess(
     output: Union[torch.Tensor, Dict[str, torch.Tensor]],
     output_format: str = "minus_one_to_one",
     current_format: str = "minus_one_to_one",
-    unpack: bool = True,
+    do_unpack: bool = True,
     patch: int = 16,
     max_grid_size: Optional[int] = None,
 ) -> Union[torch.Tensor, List[torch.Tensor]]:
@@ -74,15 +73,15 @@ def postprocess_images(
         output: Image tensor (B,C,H,W) or patch dict with 'patches' or 'images'
         output_format: Target format ("minus_one_to_one", "zero_to_one", "0_255")
         current_format: Current format of the output
-        unpack: Whether to crop to original sizes (requires dict input)
+        do_unpack: Whether to crop to original sizes (requires dict input)
         patch: Patch size for unpatchify
         max_grid_size: Maximum grid size for unpatchify
 
     Returns:
-        Images tensor or list of tensors (if unpack=True)
+        Images tensor or list of tensors (if do_unpack=True)
 
     Example:
-        images = postprocess_images(model_output, output_format="0_255")
+        images = postprocess(model_output, output_format="0_255")
     """
     if isinstance(output, dict):
         if 'images' in output:
@@ -94,22 +93,13 @@ def postprocess_images(
     else:
         images = output
 
-    # Auto-detect format if needed
-    if current_format is None:
-        if images.dtype == torch.uint8:
-            current_format = "0_255"
-        elif images.min() >= -1.5 and images.max() <= 1.5:
-            current_format = "minus_one_to_one"
-        else:
-            current_format = "zero_to_one"
-
     # Convert formats
     images = _convert_format(images, current_format, output_format)
 
-    if unpack and isinstance(output, dict):
+    if do_unpack and isinstance(output, dict):
         if 'original_height' not in output or 'original_width' not in output:
-            raise ValueError("unpack=True requires 'original_height' and 'original_width' in output")
-        return _unpack_images(images, output['original_height'], output['original_width'])
+            raise ValueError("do_unpack=True requires 'original_height' and 'original_width' in output")
+        return unpack(images, output['original_height'], output['original_width'])
 
     return images
 
@@ -159,6 +149,32 @@ def unpatchify(
     return img
 
 
+def unpack(
+    images: torch.Tensor,
+    orig_h: torch.Tensor,
+    orig_w: torch.Tensor,
+) -> List[torch.Tensor]:
+    """Crop images to their original sizes.
+
+    Args:
+        images: Image tensor (B, C, H, W)
+        orig_h: Original heights per image
+        orig_w: Original widths per image
+
+    Returns:
+        List of cropped image tensors
+    """
+    if images.ndim == 3:
+        images = images.unsqueeze(0)
+
+    cropped = []
+    for img, h, w in zip(images, orig_h, orig_w):
+        h_val = int(h.item() if isinstance(h, torch.Tensor) else h)
+        w_val = int(w.item() if isinstance(w, torch.Tensor) else w)
+        cropped.append(img[:, :h_val, :w_val])
+    return cropped
+
+
 def _tensor_to_pil(img: torch.Tensor, assume_format: str = "minus_one_to_one") -> Image.Image:
     """Convert tensor to PIL Image."""
     if img.ndim == 4:
@@ -192,19 +208,6 @@ def _convert_format(images: torch.Tensor, from_format: str, to_format: str) -> t
             return (images * 255).round().to(torch.uint8)
 
     return images
-
-
-def _unpack_images(images: torch.Tensor, orig_h: torch.Tensor, orig_w: torch.Tensor) -> List[torch.Tensor]:
-    """Crop images to their original sizes."""
-    if images.ndim == 3:
-        images = images.unsqueeze(0)
-
-    cropped = []
-    for img, h, w in zip(images, orig_h, orig_w):
-        h_val = int(h.item() if isinstance(h, torch.Tensor) else h)
-        w_val = int(w.item() if isinstance(w, torch.Tensor) else w)
-        cropped.append(img[:, :h_val, :w_val])
-    return cropped
 
 
 class RandomTileSampler:
@@ -343,8 +346,9 @@ class RandomTileSampler:
 
 
 __all__ = [
-    "preprocess_images",
-    "postprocess_images",
+    "preprocess",
+    "postprocess",
     "unpatchify",
+    "unpack",
     "RandomTileSampler",
 ]

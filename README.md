@@ -34,16 +34,15 @@ pip install -e ".[dev]"
 ### Encode and Decode Images
 
 ```python
-from vitok import AEConfig, load_ae, preprocess_images, postprocess_images
+from vitok import load_ae, preprocess, postprocess
 from PIL import Image
 
 # Load pretrained AE
-config = AEConfig(variant="Ld2-Ld22/1x16x64", variational=True)
-ae = load_ae("path/to/checkpoint.safetensors", config, device="cuda")
+ae = load_ae("path/to/checkpoint.safetensors", "Ld2-Ld22/1x16x64", device="cuda")
 
 # Encode image
 image = Image.open("input.jpg")
-patch_dict = preprocess_images(image, device="cuda")
+patch_dict = preprocess(image, device="cuda")
 encoded = ae.encode(patch_dict)
 z = encoded['z']
 
@@ -57,18 +56,18 @@ decode_dict = {
     'original_width': patch_dict['original_width'],
 }
 decoded = ae.decode(decode_dict)
-images = postprocess_images(decoded, output_format="0_255", unpack=True)
+images = postprocess(decoded, output_format="0_255", do_unpack=True)
 ```
 
 ### Generate Images with DiT
 
 ```python
-from vitok import AEConfig, DiTConfig, load_ae, load_dit
+from vitok import DiTConfig, load_ae, load_dit
 from vitok.diffusion.unipc import FlowUniPCMultistepScheduler
 import torch
 
 # Load models
-ae = load_ae("path/to/ae.safetensors", AEConfig(variant="Ld2-Ld22/1x16x64"), device="cuda")
+ae = load_ae("path/to/ae.safetensors", "Ld2-Ld22/1x16x64", device="cuda")
 dit = load_dit("path/to/dit.safetensors", DiTConfig(variant="L/256", code_width=64), device="cuda")
 
 # Setup scheduler

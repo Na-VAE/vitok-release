@@ -14,9 +14,9 @@ import pytest
 import torch
 from PIL import Image
 
-from vitok.pp import Registry, build_transform, parse_op
+from vitok.pp import OPS, build_transform, parse_op
 from vitok.data import create_dataloader, patch_collate_fn
-from vitok.naflex_io import preprocess_images, postprocess_images, unpatchify
+from vitok.naflex_io import preprocess, postprocess, unpatchify
 
 
 # =============================================================================
@@ -81,11 +81,6 @@ def webdataset_tar(real_images, tmp_path):
             # Add to tar with proper naming
             tar.add(img_bytes.name, arcname=f"{i:05d}.jpg")
 
-            # Add label file
-            label_path = tmp_path / f"{i:05d}.cls"
-            label_path.write_text(str(i))
-            tar.add(str(label_path), arcname=f"{i:05d}.cls")
-
             os.unlink(img_bytes.name)
 
     return tar_path
@@ -132,28 +127,13 @@ class TestParseOp:
             parse_op("")
 
 
-class TestRegistry:
-    """Tests for the op registry."""
+class TestOPSDict:
+    """Tests for the OPS dictionary."""
 
     def test_all_core_ops_registered(self):
-        ops = Registry.list_ops()
         expected = ["center_crop", "flip", "normalize", "patchify", "random_resized_crop", "to_tensor"]
         for op in expected:
-            assert op in ops, f"Missing core op: {op}"
-
-    def test_custom_op_registration(self):
-        @Registry.register("_test_invert")
-        def get_invert():
-            def _invert(img):
-                return Image.fromarray(255 - np.array(img))
-            return _invert
-
-        transform = build_transform("_test_invert")
-        img = Image.fromarray(np.zeros((10, 10, 3), dtype=np.uint8))
-        result = transform(img)
-        assert np.array(result).mean() == 255
-
-        del Registry._ops["_test_invert"]
+            assert op in OPS, f"Missing core op: {op}"
 
 
 # =============================================================================
@@ -375,15 +355,15 @@ class TestNaFlexRoundtrip:
         diff = (recon_crop - orig_tensor).abs().max().item()
         assert diff < 1e-5, f"Roundtrip error too large: {diff}"
 
-    def test_postprocess_images_unpack(self, real_images):
-        """Test postprocess_images with unpack=True."""
+    def test_postprocess_unpack(self, real_images):
+        """Test postprocess with do_unpack=True."""
         transform = build_transform("to_tensor|normalize(minus_one_to_one)|patchify(512, 16, 256)")
 
         patch_dicts = [transform(img) for img in [real_images["landscape"], real_images["portrait"]]]
-        batch = patch_collate_fn([(d, 0) for d in patch_dicts])[0]
+        batch = patch_collate_fn(patch_dicts)
 
         # Postprocess with unpack
-        images = postprocess_images(batch, output_format="zero_to_one", unpack=True, patch=16)
+        images = postprocess(batch, output_format="zero_to_one", do_unpack=True, patch=16)
 
         assert isinstance(images, list)
         assert len(images) == 2
@@ -402,11 +382,11 @@ class TestNaFlexRoundtrip:
         batch = {k: v.unsqueeze(0) for k, v in patch_dict.items()}
 
         # Convert to 0-255
-        result = postprocess_images(
+        result = postprocess(
             batch,
             output_format="0_255",
             current_format="minus_one_to_one",
-            unpack=False,
+            do_unpack=False,
             patch=16
         )
 
@@ -416,15 +396,15 @@ class TestNaFlexRoundtrip:
 
 
 # =============================================================================
-# Test preprocess_images High-Level API
+# Test preprocess High-Level API
 # =============================================================================
 
 
-class TestPreprocessImages:
-    """Test the high-level preprocess_images function."""
+class TestPreprocess:
+    """Test the high-level preprocess function."""
 
     def test_single_image(self, real_images):
-        batch = preprocess_images(
+        batch = preprocess(
             real_images["landscape"],
             pp="to_tensor|normalize(minus_one_to_one)|patchify(512, 16, 256)",
             device="cpu"
@@ -436,7 +416,7 @@ class TestPreprocessImages:
     def test_multiple_images(self, real_images):
         images = [real_images["landscape"], real_images["portrait"], real_images["square"]]
 
-        batch = preprocess_images(
+        batch = preprocess(
             images,
             pp="to_tensor|normalize(minus_one_to_one)|patchify(512, 16, 256)",
             device="cpu"
@@ -450,7 +430,7 @@ class TestPreprocessImages:
         img = real_images["landscape"]
         tensor = torch.from_numpy(np.array(img)).permute(2, 0, 1).float() / 127.5 - 1.0
 
-        batch = preprocess_images(
+        batch = preprocess(
             tensor,
             pp="to_tensor|normalize(minus_one_to_one)|patchify(512, 16, 256)",
             device="cpu"
@@ -478,28 +458,11 @@ class TestWebDatasetIntegration:
         )
 
         # Get one batch
-        batch, labels = next(iter(loader))
+        batch = next(iter(loader))
 
         assert "patches" in batch
         assert batch["patches"].shape[0] == 2  # Batch size
         assert batch["patches"].shape[1] == 256  # Max tokens
-        assert labels is not None
-
-    def test_create_dataloader_with_labels(self, webdataset_tar):
-        """Test that labels are correctly extracted."""
-        loader = create_dataloader(
-            source=str(webdataset_tar),
-            pp="center_crop(256)|to_tensor|normalize(minus_one_to_one)|patchify(256, 16, 256)",
-            batch_size=3,
-            num_workers=0,
-            seed=42,
-            return_labels=True,
-            label_key="cls",
-        )
-
-        batch, labels = next(iter(loader))
-        assert labels is not None
-        assert labels.shape[0] == 3
 
     def test_create_dataloader_variable_resolution(self, webdataset_tar):
         """Test NaFlex variable resolution with WebDataset."""
@@ -511,7 +474,7 @@ class TestWebDatasetIntegration:
             seed=42,
         )
 
-        batch, _ = next(iter(loader))
+        batch = next(iter(loader))
 
         # Different images should have different valid patch counts
         ptype = batch["ptype"]
@@ -526,15 +489,14 @@ class TestWebDatasetIntegration:
 
         # Create patch dicts with different valid counts
         dicts = [
-            (transform(real_images["small"]), 0),
-            (transform(real_images["landscape"]), 1),
-            (transform(real_images["large"]), 2),
+            transform(real_images["small"]),
+            transform(real_images["landscape"]),
+            transform(real_images["large"]),
         ]
 
-        batch, labels = patch_collate_fn(dicts)
+        batch = patch_collate_fn(dicts)
 
         assert batch["patches"].shape[0] == 3
-        assert labels.tolist() == [0, 1, 2]
 
         # Each should have different valid counts
         valid_counts = batch["ptype"].sum(dim=1).tolist()
@@ -557,11 +519,10 @@ class TestTrainingPipeline:
             batch_size=2,
             num_workers=0,
             seed=42,
-            return_labels=True,
         )
 
         # Simulate training loop
-        for i, (batch, labels) in enumerate(loader):
+        for i, batch in enumerate(loader):
             if i >= 2:
                 break
 
@@ -578,7 +539,7 @@ class TestTrainingPipeline:
     def test_inference_pipeline(self, real_images):
         """Test inference pipeline produces valid output."""
         # Preprocess
-        batch = preprocess_images(
+        batch = preprocess(
             [real_images["landscape"], real_images["portrait"]],
             pp="to_tensor|normalize(minus_one_to_one)|patchify(512, 16, 256)",
             device="cpu"
@@ -588,11 +549,11 @@ class TestTrainingPipeline:
         fake_output = batch.copy()
 
         # Postprocess
-        images = postprocess_images(
+        images = postprocess(
             fake_output,
             output_format="zero_to_one",
             current_format="minus_one_to_one",
-            unpack=True,
+            do_unpack=True,
             patch=16
         )
 
