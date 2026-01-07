@@ -17,15 +17,105 @@
 
 ```bash
 pip install -e .
+```
 
-# With training dependencies
-pip install -e ".[train]"
+## Quick Start
 
-# With evaluation dependencies
-pip install -e ".[eval]"
+### Encode and Decode Images
 
-# Development
-pip install -e ".[dev]"
+```python
+from vitok import AE, decode_variant, preprocess, postprocess, download_pretrained
+from safetensors.torch import load_file
+from PIL import Image
+import torch
+
+# Load pretrained AE
+weights_path = download_pretrained("L-16x64")
+model = AE(**decode_variant("Ld4-Ld24/1x16x64"))
+model.load_state_dict(load_file(weights_path))
+model.to(device="cuda", dtype=torch.bfloat16)
+model.eval()
+
+# Encode image
+image = Image.open("input.jpg")
+patch_dict = preprocess(image, device="cuda")
+encoded = model.encode(patch_dict)
+z = encoded['z']
+
+# Decode back
+decoded = model.decode(encoded)
+images = postprocess(decoded, output_format="0_255", do_unpack=True)
+```
+
+### Encoder-Only or Decoder-Only
+
+```python
+# Encoder only
+encoder = AE(**decode_variant("Ld4-Ld24/1x16x64"), decoder=False)
+encoder.load_state_dict(load_file(weights_path), strict=False)
+
+# Decoder only
+decoder = AE(**decode_variant("Ld4-Ld24/1x16x64"), encoder=False)
+decoder.load_state_dict(load_file(weights_path), strict=False)
+```
+
+## Model Variants
+
+### Pretrained Models
+
+| Alias | Full Variant | Description |
+|-------|--------------|-------------|
+| `L-16x64` | `Ld4-Ld24/1x16x64` | Large, stride 16, 64 latent channels |
+| `L-16x32` | `Ld4-Ld24/1x16x32` | Large, stride 16, 32 latent channels |
+| `L-16x16` | `Ld4-Ld24/1x16x16` | Large, stride 16, 16 latent channels |
+| `T-32x64` | `Td4-Td12/1x32x64` | Tiny, stride 32, 64 latent channels |
+| `T-32x128` | `Td4-Td12/1x32x128` | Tiny, stride 32, 128 latent channels |
+| `T-32x256` | `Td4-Td12/1x32x256` | Tiny, stride 32, 256 latent channels |
+
+### Variant Format
+
+Format: `{encoder}[-{decoder}]/{temporal}x{spatial}x{channels}`
+
+- **Encoder/Decoder sizes**: `T` (Tiny), `S` (Small), `B` (Base), `L` (Large), `G` (Giant)
+- **Asymmetric notation**: `Ld4-Ld24` = 4-layer Large encoder, 24-layer Large decoder
+- **Temporal**: Always `1` for images
+- **Spatial**: Patch stride (16 or 32)
+- **Channels**: Latent dimension
+
+## Testing
+
+```bash
+# CPU tests (fast, local)
+pytest tests/cpu/ -v
+
+# GPU tests via Modal
+modal run tests/gpu/test_all.py --quick    # Quick tests (~1 min)
+modal run tests/gpu/test_all.py            # Full tests (~3 min)
+
+# Individual GPU tests
+modal run tests/gpu/test_ae.py
+modal run tests/gpu/test_dit.py
+
+# Benchmarks
+modal run benchmarks/benchmark_mfu.py
+```
+
+## Project Structure
+
+```
+vitok/
+├── __init__.py          # Public API
+├── data.py              # create_dataloader
+├── pretrained.py        # download_pretrained, list_pretrained
+├── utils.py             # Training utilities
+├── models/
+│   ├── ae.py            # AE + decode_variant
+│   ├── dit.py           # DiT + decode_variant
+│   └── modules/         # Attention, MLP, etc.
+└── pp/                  # Preprocessing
+    ├── ops.py           # patchify, unpatchify, sample_tiles
+    ├── io.py            # preprocess, postprocess
+    └── registry.py      # DSL parser
 ```
 
 ## Modal Quickstart (GPU Inference)
@@ -51,14 +141,14 @@ modal run scripts/modal/setup_volume.py
 ### Run Inference
 
 ```bash
-# Run with default model (L-64) and astronaut test image
+# Run with default model and astronaut test image
 modal run scripts/modal/inference.py
 
 # Specify model variant
-modal run scripts/modal/inference.py --model T-64
+modal run scripts/modal/inference.py --model T-32x64
 
 # Use your own image
-modal run scripts/modal/inference.py --model L-64 --image path/to/image.jpg
+modal run scripts/modal/inference.py --model L-16x64 --image path/to/image.jpg
 
 # Save output locally
 modal run scripts/modal/inference.py --output reconstructed.png
@@ -67,95 +157,7 @@ modal run scripts/modal/inference.py --output reconstructed.png
 modal run scripts/modal/inference.py --list-models
 ```
 
-Available models: `L-16`, `L-32`, `L-64`, `T-64`, `T-128`, `T-256`
-
-## Quick Start
-
-### Encode and Decode Images
-
-```python
-from safetensors.torch import load_file
-from vitok import AE, decode_variant, preprocess, postprocess
-from PIL import Image
-import torch
-
-# Load pretrained AE
-model = AE(**decode_variant("Ld2-Ld22/1x16x64"))
-model.to(device="cuda", dtype=torch.bfloat16)
-model.load_state_dict(load_file("path/to/checkpoint.safetensors"))
-model.eval()
-
-# Encode image
-image = Image.open("input.jpg")
-patch_dict = preprocess(image, device="cuda")
-encoded = model.encode(patch_dict)
-z = encoded['z']
-
-# Decode back
-decoded = model.decode(encoded)
-images = postprocess(decoded, output_format="0_255", do_unpack=True)
-```
-
-### Encoder-Only or Decoder-Only
-
-```python
-# Encoder only
-encoder = AE(**decode_variant("Ld2-Ld22/1x16x64"), decoder=False)
-encoder.load_state_dict(load_file("checkpoint.safetensors"), strict=False)
-
-# Decoder only
-decoder = AE(**decode_variant("Ld2-Ld22/1x16x64"), encoder=False)
-decoder.load_state_dict(load_file("checkpoint.safetensors"), strict=False)
-```
-
-## Model Variants
-
-Format: `{encoder}[-{decoder}]/{temporal}x{spatial}x{channels}`
-
-| Variant | Description |
-|---------|-------------|
-| `B/1x16x64` | Base encoder/decoder, stride 16, 64 latent channels |
-| `L/1x16x64` | Large encoder/decoder |
-| `Ld2-Ld22/1x16x64` | 2-layer encoder, 22-layer decoder (asymmetric) |
-| `Gd4-G/1x16x64` | 4-layer Giant encoder, full Giant decoder |
-
-## Testing
-
-```bash
-# CPU tests (fast, local)
-pytest tests/cpu/ -v
-
-# GPU tests via Modal
-modal run tests/gpu/test_all.py --quick    # Quick tests (~1 min)
-modal run tests/gpu/test_all.py            # Full tests (~3 min)
-
-# Individual GPU tests
-modal run tests/gpu/test_ae.py
-modal run tests/gpu/test_dit.py
-
-# Benchmarks
-modal run benchmarks/benchmark_mfu.py
-```
-
-## Project Structure
-
-```
-vitok-release/
-├── vitok/                    # Core library
-│   ├── ae.py                 # AE, decode_variant
-│   ├── naflex_io.py          # preprocess, postprocess, unpatchify
-│   ├── data.py               # create_dataloader
-│   ├── models/               # AE, DiT implementations
-│   └── pp/                   # Preprocessing pipeline DSL
-├── scripts/                  # Training and utility scripts
-│   └── modal/                # Modal inference scripts
-├── tests/
-│   ├── cpu/                  # CPU tests (pytest)
-│   ├── gpu/                  # GPU tests (Modal)
-│   ├── visual/               # Visual inspection tests
-│   └── utils/                # Debug utilities
-└── benchmarks/               # Performance benchmarks
-```
+Available models: `L-16x64`, `L-16x32`, `L-16x16`, `T-32x64`, `T-32x128`, `T-32x256`
 
 ## License
 
