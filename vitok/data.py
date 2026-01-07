@@ -2,8 +2,8 @@
 
 Example:
     loader = create_dataloader(
-        source="hf://imagenet-1k/train/*.tar",
-        pp="random_resized_crop(512)|flip|to_tensor|normalize(minus_one_to_one)|patchify(512, 16, 256)",
+        source="hf://timm/imagenet-22k-wds/imagenet22k-train-{0000..0099}.tar",
+        pp="resize_longest_side(512)|to_tensor|normalize(minus_one_to_one)|patchify(16, 256)",
         batch_size=32,
     )
 """
@@ -11,6 +11,7 @@ Example:
 from __future__ import annotations
 
 import random
+import re
 from pathlib import Path
 from typing import Callable, List, Optional
 
@@ -23,35 +24,40 @@ from vitok.pp import build_transform
 
 
 def patch_collate_fn(batch):
-    """Collate function for patchified data.
+    """Collate patch dicts into batched tensors."""
+    if not batch:
+        return {}
 
-    Handles:
-    - (dict, label) tuples from patchified pipelines
-    - (tensor, label) tuples from square image pipelines
-    - plain dicts or tensors (no labels)
-    """
-    if len(batch) == 0:
-        return {}, None
-
-    if isinstance(batch[0], tuple):
-        patch_dicts, labels = zip(*batch)
-        labels = torch.tensor(labels, dtype=torch.long) if labels[0] is not None else None
-    else:
-        patch_dicts = batch
-        labels = None
-
-    if isinstance(patch_dicts[0], torch.Tensor):
-        return torch.stack(patch_dicts, dim=0), labels
+    if isinstance(batch[0], torch.Tensor):
+        return torch.stack(batch, dim=0)
 
     collated = {}
-    for k in patch_dicts[0].keys():
-        items = [d[k] for d in patch_dicts]
+    for k in batch[0].keys():
+        items = [d[k] for d in batch]
         if isinstance(items[0], torch.Tensor):
             collated[k] = torch.stack(items, dim=0)
         else:
             collated[k] = items
+    return collated
 
-    return collated, labels
+
+def to_rgb(img: Image.Image) -> Image.Image:
+    """Convert image to RGB, handling transparency and EXIF rotation."""
+    try:
+        img = ImageOps.exif_transpose(img)
+    except Exception:
+        pass
+
+    if img.mode == "P" and "transparency" in getattr(img, "info", {}):
+        img = img.convert("RGBA")
+
+    if img.mode in ("RGBA", "LA"):
+        bg = Image.new("RGBA", img.size, (255, 255, 255, 255))
+        img = Image.alpha_composite(bg.convert("RGBA"), img.convert("RGBA")).convert("RGB")
+    elif img.mode != "RGB":
+        img = img.convert("RGB")
+
+    return img
 
 
 def create_dataloader(
@@ -60,346 +66,130 @@ def create_dataloader(
     batch_size: int = 32,
     num_workers: int = 4,
     seed: int = 0,
-    prefetch_factor: int = 4,
+    shuffle_buffer: int = 10000,
     min_size: Optional[int] = None,
-    return_labels: bool = False,
-    label_key: str = "cls",
-    shuffle_buffer: int = 100000,
 ) -> wds.WebLoader:
     """Create a dataloader from source with preprocessing.
 
     Args:
-        source: Data source. Formats:
-            - "hf://repo/subdir/*.tar" for HuggingFace Hub
-            - "/path/to/*.tar" or "/path/to/dir" for local WebDataset
+        source: Data source:
+            - "hf://org/repo/pattern.tar" for HuggingFace Hub
+            - "/path/to/*.tar" for local WebDataset
         pp: Preprocessing string, e.g.:
-            "random_resized_crop(512)|flip|to_tensor|normalize(minus_one_to_one)|patchify(512, 16, 256)"
+            "resize_longest_side(512)|to_tensor|normalize(minus_one_to_one)|patchify(16, 256)"
         batch_size: Batch size
         num_workers: DataLoader workers
-        seed: Random seed for shuffling
-        prefetch_factor: Prefetch factor
-        min_size: Optional minimum image size filter
-        return_labels: Whether to return labels
-        label_key: Key for labels in WebDataset samples
+        seed: Random seed
         shuffle_buffer: Shuffle buffer size
+        min_size: Optional minimum image dimension filter
 
     Returns:
-        WebLoader yielding (batch_dict, labels) tuples
+        WebLoader yielding batch dicts
     """
     transform = build_transform(pp)
+    urls = _resolve_source(source, seed)
 
-    if source.startswith("hf://"):
-        # HuggingFace Hub streaming
-        tar_files = _get_hf_shard_urls(source)
-    else:
-        # Local WebDataset
-        tar_files = _get_local_tar_files(source)
-
-    if not tar_files:
-        raise ValueError(f"No tar files found for source: {source}")
-
-    dataset = _WebDatasetWrapper(
-        tar_files=tar_files,
-        transform=transform,
-        batch_size=batch_size,
-        seed=seed,
-        shuffle_buffer=shuffle_buffer,
-        min_size=min_size,
-        return_labels=return_labels,
-        label_key=label_key,
+    # Build pipeline
+    dataset = (
+        wds.WebDataset(urls, resampled=True, handler=wds.ignore_and_continue)
+        .shuffle(shuffle_buffer, seed=seed)
+        .decode("pil", handler=wds.ignore_and_continue)
+        .rename(image="jpg;jpeg;png;webp")
+        .map_dict(image=to_rgb)
     )
 
-    loader = wds.WebLoader(
-        dataset.build(),
+    if min_size is not None:
+        dataset = dataset.select(lambda s: min(s["image"].size) >= min_size)
+
+    dataset = (
+        dataset
+        .map(lambda s: transform(s["image"]))
+        .batched(batch_size, partial=False, collation_fn=patch_collate_fn)
+    )
+
+    return wds.WebLoader(
+        dataset,
         batch_size=None,
         num_workers=num_workers,
-        prefetch_factor=prefetch_factor if num_workers > 0 else None,
         pin_memory=True,
         persistent_workers=num_workers > 0,
     )
-    return loader
 
 
-def _get_hf_shard_urls(source: str) -> List[str]:
-    """Parse hf://repo/subdir/*.tar and get streaming URLs.
+def _resolve_source(source: str, seed: int = 0) -> list[str]:
+    """Convert source string to list of URLs for WebDataset."""
+    if source.startswith("hf://"):
+        return _hf_to_urls(source, seed)
+    return _local_to_urls(source, seed)
 
-    Supports glob patterns like:
-        hf://timm/imagenet-22k-wds/imagenet22k-train-{0000..0099}.tar  (brace expansion)
-        hf://timm/imagenet-22k-wds/imagenet22k-train-00*.tar  (glob via HF API)
-        hf://timm/imagenet-22k-wds/*.tar  (all shards)
+
+def _hf_to_urls(source: str, seed: int = 0) -> list[str]:
+    """Convert hf://org/repo/pattern.tar to curl URLs.
+
+    Supports brace expansion: hf://org/repo/data-{0000..0099}.tar
     """
-    import fnmatch
-    import os
-    import re
-
-    try:
-        from huggingface_hub import HfFileSystem, get_token
-    except ImportError:
-        raise ImportError("huggingface_hub is required for HuggingFace sources")
-
-    if not source.startswith("hf://"):
-        raise ValueError(f"Expected hf:// source, got: {source}")
+    from huggingface_hub import get_token
 
     path = source[5:]  # Remove "hf://"
+    token = get_token()
+    auth = f" -H 'Authorization:Bearer {token}'" if token else ""
 
-    # Get HF token for authentication
-    hf_token = get_token()
-    auth_header = f" -H 'Authorization:Bearer {hf_token}'" if hf_token else ""
+    # Check for brace expansion {start..end}
+    match = re.search(r'\{(\d+)\.\.(\d+)\}', path)
+    if match:
+        start, end = int(match.group(1)), int(match.group(2))
+        width = len(match.group(1))
+        prefix, suffix = path[:match.start()], path[match.end():]
 
-    # Check for brace expansion pattern like {0000..0099}
-    brace_match = re.search(r'\{(\d+)\.\.(\d+)\}', path)
-    if brace_match:
-        # Handle brace expansion directly without HF API call
-        start = int(brace_match.group(1))
-        end = int(brace_match.group(2))
-        width = len(brace_match.group(1))
+        # Extract repo from path (org/repo/subdir/file -> org/repo)
+        parts = prefix.split('/')
+        repo = '/'.join(parts[:2])
+        subpath = '/'.join(parts[2:])
 
-        # Extract repo and file pattern
-        # path = "timm/imagenet-22k-wds/imagenet22k-train-{0000..0049}.tar"
-        # prefix = "timm/imagenet-22k-wds/imagenet22k-train-"
-        # suffix = ".tar"
-        prefix = path[:brace_match.start()]
-        suffix = path[brace_match.end():]
-
-        # Find the last / before the brace to separate repo path from filename
-        last_slash = prefix.rfind('/')
-        if last_slash == -1:
-            raise ValueError(f"Invalid hf:// source format: {source}")
-
-        repo_path = prefix[:last_slash]  # "timm/imagenet-22k-wds"
-        file_prefix = prefix[last_slash + 1:]  # "imagenet22k-train-"
-
-        # Parse repo (org/repo) from repo_path
-        repo_parts = repo_path.split('/')
-        if len(repo_parts) >= 2:
-            repo = '/'.join(repo_parts[:2])
-            subdir = '/'.join(repo_parts[2:]) if len(repo_parts) > 2 else ''
-        else:
-            raise ValueError(f"Invalid hf:// source format: {source}")
-
-        print(f"[Data] Brace expansion: repo={repo}, subdir={subdir}, file_prefix={file_prefix}, range={start}-{end}")
-
-        shard_urls = []
+        urls = []
         for i in range(start, end + 1):
-            num_str = str(i).zfill(width)
-            filename = f"{file_prefix}{num_str}{suffix}"
-            if subdir:
-                rel_path = f"{subdir}/{filename}"
-            else:
-                rel_path = filename
-            url = f"pipe:curl -s -L --connect-timeout 30 --retry 3 https://huggingface.co/datasets/{repo}/resolve/main/{rel_path}{auth_header}"
-            shard_urls.append(url)
+            num = str(i).zfill(width)
+            rel = f"{subpath}{num}{suffix}"
+            urls.append(f"pipe:curl -sL https://huggingface.co/datasets/{repo}/resolve/main/{rel}{auth}")
 
-        print(f"[Data] Generated {len(shard_urls)} shard URLs")
-        return shard_urls
+        # Shuffle by seed for distributed
+        rng = random.Random(seed)
+        rng.shuffle(urls)
 
-    # Parse for glob patterns (* or ?)
-    parts = path.split("/")
+        # Split by rank
+        if dist.is_initialized():
+            rank, world = dist.get_rank(), dist.get_world_size()
+            urls = urls[rank::world]
 
-    if len(parts) < 2:
-        raise ValueError(f"Invalid hf:// source format: {source}")
+        return urls
 
-    # Find pattern (last part with * or ?)
-    pattern_idx = None
-    for i, part in enumerate(parts):
-        if "*" in part or "?" in part:
-            pattern_idx = i
-            break
-
-    if pattern_idx is None:
-        # No pattern, assume *.tar
-        repo = "/".join(parts)
-        subdir = None
-        pattern = "*.tar"
-    else:
-        repo = "/".join(parts[:pattern_idx])
-        pattern = parts[pattern_idx]
-        subdir = "/".join(parts[pattern_idx + 1:]) if pattern_idx + 1 < len(parts) else None
-
-    # Handle repo/subdir split (org/repo/subdir case)
-    if "/" in repo and not any(c in repo for c in ["*", "?"]):
-        repo_parts = repo.split("/")
-        if len(repo_parts) > 2:
-            repo = "/".join(repo_parts[:2])
-            subdir = "/".join(repo_parts[2:])
-
-    # Use HfFileSystem with timeout handling
-    print(f"[Data] Listing HF shards for {repo} with pattern '{pattern}'...")
-    fs = HfFileSystem()
-    prefix = f"datasets/{repo}"
-    if subdir:
-        prefix = f"{prefix}/{subdir}"
-
-    glob_pattern = f"{prefix}/{pattern}"
-    shard_urls = []
-
-    try:
-        # Set a timeout for the glob operation
-        import signal
-
-        def timeout_handler(signum, frame):
-            raise TimeoutError(f"HfFileSystem.glob timed out after 60s for {glob_pattern}")
-
-        # Only use signal on main thread (Unix)
-        use_signal = hasattr(signal, 'SIGALRM') and os.name != 'nt'
-        if use_signal:
-            old_handler = signal.signal(signal.SIGALRM, timeout_handler)
-            signal.alarm(60)  # 60 second timeout
-
-        try:
-            matches = fs.glob(glob_pattern)
-        finally:
-            if use_signal:
-                signal.alarm(0)
-                signal.signal(signal.SIGALRM, old_handler)
-
-        print(f"[Data] Found {len(matches)} shards")
-
-        for match in matches:
-            # Build streaming URL with timeout and retry
-            rel_path = match.replace(f"datasets/{repo}/", "")
-            url = f"pipe:curl -s -L --connect-timeout 30 --retry 3 https://huggingface.co/datasets/{repo}/resolve/main/{rel_path}{auth_header}"
-            shard_urls.append(url)
-    except TimeoutError as e:
-        raise ValueError(str(e))
-    except Exception as e:
-        raise ValueError(f"Failed to find shards at {glob_pattern}: {e}")
-
-    return sorted(shard_urls)
+    # No brace expansion - single URL or let WebDataset handle it
+    parts = path.split('/')
+    repo = '/'.join(parts[:2])
+    rel = '/'.join(parts[2:])
+    return [f"pipe:curl -sL https://huggingface.co/datasets/{repo}/resolve/main/{rel}{auth}"]
 
 
-def _get_local_tar_files(source: str) -> List[str]:
-    """Get local tar files from path or glob pattern."""
+def _local_to_urls(source: str, seed: int = 0) -> list[str]:
+    """Resolve local path to list of tar files."""
     path = Path(source)
 
-    if "*" in source:
-        # Glob pattern
-        parent = path.parent
-        pattern = path.name
-        if parent.exists():
-            return sorted(str(f) for f in parent.glob(pattern))
-        return []
+    if "*" in source or "?" in source:
+        urls = sorted(str(f) for f in path.parent.glob(path.name))
+    elif path.is_dir():
+        urls = sorted(str(f) for f in path.rglob("*.tar"))
+    else:
+        urls = [str(path)]
 
-    if path.is_file() and path.suffix == ".tar":
-        return [str(path)]
+    # Shuffle and split by rank
+    rng = random.Random(seed)
+    rng.shuffle(urls)
 
-    if path.is_dir():
-        return sorted(str(f) for f in path.rglob("*.tar"))
+    if dist.is_initialized():
+        rank, world = dist.get_rank(), dist.get_world_size()
+        urls = urls[rank::world]
 
-    return []
-
-
-class _WebDatasetWrapper:
-    """Internal wrapper for building WebDataset pipelines."""
-
-    def __init__(
-        self,
-        tar_files: List[str],
-        transform: Callable,
-        batch_size: int,
-        seed: int,
-        shuffle_buffer: int,
-        min_size: Optional[int],
-        return_labels: bool,
-        label_key: str,
-    ):
-        self.tar_files = tar_files
-        self.transform = transform
-        self.batch_size = batch_size
-        self.seed = seed
-        self.shuffle_buffer = shuffle_buffer
-        self.min_size = min_size
-        self.return_labels = return_labels
-        self.label_key = label_key
-
-    def build(self):
-        """Build the WebDataset pipeline."""
-        rank = dist.get_rank() if dist.is_initialized() else 0
-        world_size = dist.get_world_size() if dist.is_initialized() else 1
-
-        # Shuffle and split tar files by rank
-        tar_rng = random.Random(self.seed)
-        tar_files = self.tar_files[:]
-        tar_rng.shuffle(tar_files)
-        rank_tar_files = [tar_files[i] for i in range(rank, len(tar_files), world_size)]
-
-        sample_shuffle_seed = self.seed + rank
-
-        dataset = (
-            wds.WebDataset(
-                rank_tar_files,
-                handler=wds.ignore_and_continue,
-                nodesplitter=wds.split_by_node,
-                shardshuffle=False,
-                resampled=True,
-            )
-            .shuffle(self.shuffle_buffer, seed=sample_shuffle_seed)
-            .decode("pil", handler=wds.ignore_and_continue)
-            .select(self._has_image)
-            .map(self._normalize_keys)
-            .map_dict(jpg=self._ensure_rgb)
-            .select(self._filter_size)
-            .map(self._process)
-            .batched(self.batch_size, partial=False, collation_fn=patch_collate_fn)
-        )
-        return dataset
-
-    @staticmethod
-    def _has_image(sample: dict) -> bool:
-        return any(k in sample for k in ("jpg", "jpeg", "png", "webp"))
-
-    @staticmethod
-    def _normalize_keys(sample: dict) -> dict:
-        for key in ("jpg", "jpeg", "png", "webp"):
-            if key in sample:
-                if key != "jpg":
-                    sample["jpg"] = sample[key]
-                return sample
-        return sample
-
-    @staticmethod
-    def _ensure_rgb(img: Image.Image) -> Image.Image:
-        try:
-            img = ImageOps.exif_transpose(img)
-        except Exception:
-            pass
-
-        if img.mode == "P" and "transparency" in getattr(img, "info", {}):
-            img = img.convert("RGBA")
-
-        if img.mode in ("RGBA", "LA"):
-            if img.mode != "RGBA":
-                img = img.convert("RGBA")
-            bg = Image.new("RGBA", img.size, (255, 255, 255, 255))
-            img = Image.alpha_composite(bg, img).convert("RGB")
-        elif img.mode != "RGB":
-            img = img.convert("RGB")
-
-        return img
-
-    def _filter_size(self, sample: dict) -> bool:
-        if self.min_size is None:
-            return True
-        w, h = sample["jpg"].size
-        return min(w, h) >= self.min_size
-
-    def _process(self, sample: dict):
-        image = sample["jpg"]
-        result = self.transform(image)
-
-        label = 0
-        if self.return_labels:
-            raw = sample.get(self.label_key)
-            if raw is not None:
-                try:
-                    if isinstance(raw, (bytes, bytearray)):
-                        label = int(raw.decode("utf-8").strip())
-                    elif isinstance(raw, (str, int)):
-                        label = int(raw)
-                except Exception:
-                    label = 0
-
-        return result, label
+    return urls
 
 
-__all__ = ["create_dataloader", "patch_collate_fn"]
+__all__ = ["create_dataloader", "patch_collate_fn", "to_rgb"]

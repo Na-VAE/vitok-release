@@ -1,4 +1,4 @@
-"""Preprocessing registry and DSL parser.
+"""Preprocessing DSL parser.
 
 Build transform pipelines from string specifications like:
     "random_resized_crop(512)|flip|to_tensor|normalize(minus_one_to_one)|patchify(512, 16, 256)"
@@ -9,42 +9,9 @@ from __future__ import annotations
 import ast
 import re
 from functools import reduce
-from typing import Any, Callable, Dict, List, Tuple
+from typing import Any, Callable, Dict, Tuple
 
-
-class Registry:
-    """Global registry for preprocessing ops.
-
-    Usage:
-        @Registry.register("resize")
-        def get_resize(size: int):
-            def _resize(image):
-                return image.resize((size, size))
-            return _resize
-    """
-
-    _ops: Dict[str, Callable[..., Callable]] = {}
-
-    @classmethod
-    def register(cls, name: str) -> Callable:
-        """Decorator to register an op factory."""
-        def decorator(fn: Callable[..., Callable]) -> Callable[..., Callable]:
-            cls._ops[name] = fn
-            return fn
-        return decorator
-
-    @classmethod
-    def get(cls, name: str) -> Callable[..., Callable]:
-        """Get an op factory by name."""
-        if name not in cls._ops:
-            available = ", ".join(sorted(cls._ops.keys()))
-            raise KeyError(f"Unknown op: '{name}'. Available: {available}")
-        return cls._ops[name]
-
-    @classmethod
-    def list_ops(cls) -> List[str]:
-        """List all registered op names."""
-        return sorted(cls._ops.keys())
+from vitok.pp.ops import OPS
 
 
 def parse_op(op_str: str) -> Tuple[str, Tuple[Any, ...], Dict[str, Any]]:
@@ -120,7 +87,10 @@ def build_transform(pp_string: str) -> Callable:
         if not op_str:
             continue
         name, args, kwargs = parse_op(op_str)
-        factory = Registry.get(name)
+        if name not in OPS:
+            available = ", ".join(sorted(OPS.keys()))
+            raise KeyError(f"Unknown op: '{name}'. Available: {available}")
+        factory = OPS[name]
         ops.append(factory(*args, **kwargs))
 
     if not ops:
@@ -132,4 +102,4 @@ def build_transform(pp_string: str) -> Callable:
     return composed
 
 
-__all__ = ["Registry", "build_transform", "parse_op"]
+__all__ = ["build_transform", "parse_op", "OPS"]

@@ -32,7 +32,7 @@ from vitok import DiTConfig, create_dit
 from vitok import create_dataloader
 from vitok.diffusion import FlowUniPCMultistepScheduler
 from vitok.naflex_io import postprocess_images
-from vitok.utils.weights import load_weights
+from safetensors.torch import load_file
 from vitok import training_utils as tu
 
 
@@ -158,8 +158,9 @@ def main():
     # Load checkpoint if resuming
     start_step = 0
     if config.dit_checkpoint:
-        load_weights(dit, config.dit_checkpoint, strict=False)
-        load_weights(ema, config.dit_checkpoint, strict=False)
+        state = load_file(config.dit_checkpoint)
+        dit.load_state_dict(state, strict=False)
+        ema.load_state_dict(state, strict=False)
         train_state_path = Path(config.dit_checkpoint).parent / "train_state.pt"
         if train_state_path.exists():
             state = torch.load(train_state_path, map_location='cpu')

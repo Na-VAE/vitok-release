@@ -11,10 +11,7 @@ from vitok.models.modules.attention import Attention, create_2d_block_mask
 from vitok.models.modules.norm import RMSNorm, LayerNorm
 from vitok.models.modules.rotary_embedding import compute_2d_freqs_cis
 
-try:
-    from torchao.float8 import convert_to_float8_training
-except ImportError:
-    convert_to_float8_training = None
+from torchao.float8 import convert_to_float8_training
 
 def _make_score_mod(attn_mask: torch.Tensor, num_special: int = 0):
     """Create score_mod from attention mask, handling special tokens inline."""
@@ -108,7 +105,6 @@ class AE(nn.Module):
         encoder_heads=12,
         decoder_heads=12,
         mlp_factor=2.67,
-        variational=False,
         checkpoint: int = 0,
         spatial_stride: int = 16,
         temporal_stride: int = 1,
@@ -147,7 +143,6 @@ class AE(nn.Module):
         self.decoder_width = decoder_width
         self.encoder_heads = encoder_heads
         self.decoder_heads = decoder_heads
-        self.variational = variational
         self.checkpoint = checkpoint
         self.spatial_stride = spatial_stride
         self.class_token = class_token
@@ -169,10 +164,7 @@ class AE(nn.Module):
 
             self.patch_embed = nn.Linear(self.pixels_per_token, self.encoder_width)
 
-            self.to_code = nn.Linear(
-                encoder_width,
-                channels_per_token * 2 if variational else channels_per_token,
-            )
+            self.to_code = nn.Linear(encoder_width, channels_per_token)
 
             blocks = []
             for layer_idx in range(encoder_depth):
@@ -191,8 +183,6 @@ class AE(nn.Module):
                     sliding_window=sliding_window,
                 )
                 if self.float8:
-                    if convert_to_float8_training is None:
-                        raise ImportError("torchao is required for float8 training.")
                     convert_to_float8_training(block)
                 blocks.append(block)
             self.encoder_blocks = nn.ModuleList(blocks)
@@ -226,8 +216,6 @@ class AE(nn.Module):
                     sliding_window=sliding_window,
                 )
                 if self.float8:
-                    if convert_to_float8_training is None:
-                        raise ImportError("torchao is required for float8 training.")
                     convert_to_float8_training(block)
                 blocks.append(block)
             self.decoder_blocks = nn.ModuleList(blocks)
@@ -250,9 +238,12 @@ class AE(nn.Module):
         device: torch.device,
         batch_size: int,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        yidx = patch_dict['yidx'].to(device=device, dtype=torch.float32)
-        xidx = patch_dict['xidx'].to(device=device, dtype=torch.float32)
-        freqs_cos, freqs_sin = compute_2d_freqs_cis(yidx, xidx, head_dim, self.rope_theta)
+        # Support both old and new key names
+        row = patch_dict.get('row_idx', patch_dict.get('yidx'))
+        col = patch_dict.get('col_idx', patch_dict.get('xidx'))
+        row = row.to(device=device, dtype=torch.float32)
+        col = col.to(device=device, dtype=torch.float32)
+        freqs_cos, freqs_sin = compute_2d_freqs_cis(row, col, head_dim, self.rope_theta)
         S = self.num_special_tokens
         if S > 0:
             rope_dim = freqs_cos.shape[-1]
@@ -302,16 +293,22 @@ class AE(nn.Module):
         z = self.to_code(x)
         # Apply output normalization (LayerNorm on latent codes)
         z = self.output_fn(z)
-        # Explicitly copy required keys (torch.compile fullgraph compatible)
+
+        # Build output with new key names (support old names for reading)
+        mask = patch_dict.get('patch_mask', patch_dict.get('ptype'))
+        row = patch_dict.get('row_idx', patch_dict.get('yidx'))
+        col = patch_dict.get('col_idx', patch_dict.get('xidx'))
+        orig_h = patch_dict.get('orig_height', patch_dict.get('original_height'))
+        orig_w = patch_dict.get('orig_width', patch_dict.get('original_width'))
+
         encode_dict = {
-            'ptype': patch_dict['ptype'],
-            'yidx': patch_dict['yidx'],
-            'xidx': patch_dict['xidx'],
-            'original_height': patch_dict['original_height'],
-            'original_width': patch_dict['original_width'],
+            'patch_mask': mask,
+            'row_idx': row,
+            'col_idx': col,
+            'orig_height': orig_h,
+            'orig_width': orig_w,
             'z': z,
         }
-        # Copy optional keys if present
         if 'attention_mask' in patch_dict:
             encode_dict['attention_mask'] = patch_dict['attention_mask']
         return encode_dict
@@ -354,24 +351,35 @@ class AE(nn.Module):
             x = x[:, self.num_special_tokens:]
 
         pred_patches = self.to_pixels(x)
-        # Explicitly copy required keys (torch.compile fullgraph compatible)
+
+        # Build output with new key names (support old names for reading)
+        mask = encode_dict.get('patch_mask', encode_dict.get('ptype'))
+        row = encode_dict.get('row_idx', encode_dict.get('yidx'))
+        col = encode_dict.get('col_idx', encode_dict.get('xidx'))
+        orig_h = encode_dict.get('orig_height', encode_dict.get('original_height'))
+        orig_w = encode_dict.get('orig_width', encode_dict.get('original_width'))
+
         decode_dict = {
-            'ptype': encode_dict['ptype'],
-            'yidx': encode_dict['yidx'],
-            'xidx': encode_dict['xidx'],
+            'patch_mask': mask,
+            'row_idx': row,
+            'col_idx': col,
             'patches': pred_patches,
         }
-        if 'original_height' in encode_dict:
-            decode_dict['original_height'] = encode_dict['original_height']
-        if 'original_width' in encode_dict:
-            decode_dict['original_width'] = encode_dict['original_width']
-        # Copy optional keys if present
+        if orig_h is not None:
+            decode_dict['orig_height'] = orig_h
+        if orig_w is not None:
+            decode_dict['orig_width'] = orig_w
         if 'attention_mask' in encode_dict:
             decode_dict['attention_mask'] = encode_dict['attention_mask']
         return decode_dict
 
     def forward(self, x: Dict[str, torch.Tensor]):
-        """Full forward pass: encode, sample, decode."""
+        """Full forward pass: encode then decode.
+
+        If encoder+decoder: returns decoded patches dict
+        If encoder-only: returns encode dict with 'z'
+        If decoder-only: expects dict with 'z', returns patches dict
+        """
         if self.encoder:
             x = self.encode(x)
         if self.decoder:
