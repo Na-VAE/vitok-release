@@ -60,7 +60,7 @@ def main():
     parser.add_argument("--max_size", type=int, default=256)
     parser.add_argument("--patch_size", type=int, default=16)
     parser.add_argument("--max_tokens", type=int, default=256)
-    parser.add_argument("--square_crop_prob", type=float, default=0.5,
+    parser.add_argument("--square_crop_prob", type=float, default=0.25,
                         help="Probability of using square crop vs native aspect ratio")
 
     # Model
