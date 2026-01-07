@@ -12,8 +12,9 @@ from __future__ import annotations
 
 import math
 import random
-from typing import Sequence, Tuple
+from typing import Callable, Sequence, Tuple
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 import torchvision.transforms as T
@@ -22,31 +23,19 @@ from PIL import Image
 
 
 # =============================================================================
-# Resize ops (PIL -> PIL or Tensor -> Tensor)
+# Resize ops (PIL -> PIL)
 # =============================================================================
 
 
 def resize_longest_side(max_size: int):
-    """Resize so longest side is at most max_size, preserving aspect ratio.
-
-    Works on both PIL Images and Tensors.
-    """
-    def _resize(img):
-        if isinstance(img, Image.Image):
-            w, h = img.size
-            if max(h, w) <= max_size:
-                return img
-            scale = max_size / max(h, w)
-            new_h, new_w = int(round(h * scale)), int(round(w * scale))
-            return TF.resize(img, [new_h, new_w], interpolation=TF.InterpolationMode.LANCZOS, antialias=True)
-        else:
-            # Tensor (C, H, W) - use BICUBIC since LANCZOS not supported for tensors
-            c, h, w = img.shape
-            if max(h, w) <= max_size:
-                return img
-            scale = max_size / max(h, w)
-            new_h, new_w = max(1, int(round(h * scale))), max(1, int(round(w * scale)))
-            return TF.resize(img, [new_h, new_w], interpolation=TF.InterpolationMode.BICUBIC, antialias=True)
+    """Resize so longest side is at most max_size, preserving aspect ratio."""
+    def _resize(img: Image.Image) -> Image.Image:
+        w, h = img.size
+        if max(h, w) <= max_size:
+            return img
+        scale = max_size / max(h, w)
+        new_h, new_w = int(round(h * scale)), int(round(w * scale))
+        return TF.resize(img, [new_h, new_w], interpolation=TF.InterpolationMode.LANCZOS, antialias=True)
     return _resize
 
 
@@ -56,9 +45,23 @@ def resize_longest_side(max_size: int):
 
 
 def center_crop(size: int):
-    """Center crop to size x size."""
+    """ADM-style center crop with anti-aliasing.
+
+    Reference:
+        https://github.com/openai/guided-diffusion/blob/main/guided_diffusion/image_datasets.py#L126
+    """
     def _center_crop(img: Image.Image) -> Image.Image:
-        return TF.center_crop(img, [size, size])
+        # Downsample by 2x while min side >= 2 * target (reduces aliasing)
+        while min(*img.size) >= 2 * size:
+            img = img.resize(tuple(x // 2 for x in img.size), resample=Image.BOX)
+        # Scale so min side == target
+        scale = size / min(*img.size)
+        img = img.resize(tuple(round(x * scale) for x in img.size), resample=Image.BICUBIC)
+        # Center crop
+        arr = np.array(img)
+        crop_y = (arr.shape[0] - size) // 2
+        crop_x = (arr.shape[1] - size) // 2
+        return Image.fromarray(arr[crop_y:crop_y + size, crop_x:crop_x + size])
     return _center_crop
 
 
@@ -93,20 +96,28 @@ def flip(p: float = 0.5):
 # =============================================================================
 
 
-def identity():
+def identity() -> Callable:
     """No-op transform."""
     def _identity(x):
         return x
     return _identity
 
 
-def random_choice(ops: Sequence[str], probs: Sequence[float]):
+def random_choice(ops: Sequence[str], probs: Sequence[float]) -> Callable:
     """Randomly apply one of several ops.
 
     Args:
         ops: Sequence of op spec strings (e.g., ['random_resized_crop(256)', 'identity'])
         probs: Probability weights (same length as ops)
+
+    Raises:
+        ValueError: If ops/probs are empty or have mismatched lengths
     """
+    if not ops:
+        raise ValueError("ops cannot be empty")
+    if len(ops) != len(probs):
+        raise ValueError(f"ops and probs must have same length: {len(ops)} != {len(probs)}")
+
     from vitok.pp.registry import parse_op
 
     resolved = []
@@ -160,66 +171,73 @@ def _fit_to_token_budget(
     w: int,
     patch: int,
     max_tokens: int,
-    max_grid_size: int | None = None,
+    eps: float = 1e-5,
 ) -> Tuple[int, int]:
-    """Find the largest (h', w') <= (h, w) that fits within token budget."""
+    """Find the largest (h', w') <= (h, w) that fits within token budget.
+
+    Uses closed-form calculation without iterative fallback.
+    """
     h_p = math.ceil(h / patch)
     w_p = math.ceil(w / patch)
 
-    within_tokens = (h_p * w_p) <= max_tokens
-    within_grid = (max_grid_size is None) or (h_p <= max_grid_size and w_p <= max_grid_size)
-    if within_tokens and within_grid:
+    # Early exit if already within budget
+    if h_p * w_p <= max_tokens:
         return h, w
 
+    # Scale down to fit token budget (floor + eps for stability)
     scale = math.sqrt(max_tokens / (h_p * w_p))
-    new_h_p = max(1, int(h_p * scale))
-    new_w_p = max(1, int(w_p * scale))
+    new_h_p = max(1, math.floor(h_p * scale + eps))
+    new_w_p = max(1, math.floor(w_p * scale + eps))
 
-    if max_grid_size is not None:
-        new_h_p = min(new_h_p, max_grid_size)
-        new_w_p = min(new_w_p, max_grid_size)
+    new_h = new_h_p * patch
+    new_w = new_w_p * patch
 
-    new_h = min(new_h_p * patch, h)
-    new_w = min(new_w_p * patch, w)
-
-    return new_h, new_w
+    return min(new_h, h), min(new_w, w)
 
 
-def patchify(
-    patch: int = 16,
-    max_tokens: int = 256,
-    max_grid_size: int | None = None,
-):
-    """Convert tensor to patch dictionary.
-
-    Resizes to fit token budget, pads to patch boundary, and unfolds to patches.
+def resize_to_token_budget(patch: int, max_tokens: int):
+    """Resize tensor to fit within token budget.
 
     Args:
         patch: Patch size in pixels
-        max_tokens: Maximum number of patches (token budget)
-        max_grid_size: Optional maximum grid dimension
+        max_tokens: Maximum number of patches allowed
+
+    Input: Tensor (C, H, W)
+    Output: Tensor (C, H', W') where ceil(H'/patch) * ceil(W'/patch) <= max_tokens
+    """
+    def _resize(img: torch.Tensor) -> torch.Tensor:
+        c, h, w = img.shape
+        target_h, target_w = _fit_to_token_budget(h, w, patch, max_tokens)
+        if (target_h, target_w) != (h, w):
+            img = TF.resize(img, [target_h, target_w], interpolation=TF.InterpolationMode.BICUBIC, antialias=True)
+        return img
+    return _resize
+
+
+def patchify(patch: int = 16, max_tokens: int = 256):
+    """Convert tensor to patch dictionary.
+
+    Pads to patch boundary and unfolds to patches. Does NOT resize - use
+    resize_to_token_budget() before patchify() if resizing is needed.
+
+    Args:
+        patch: Patch size in pixels
+        max_tokens: Maximum number of patches (for padding output)
 
     Input: Tensor (C, H, W) - normalized
     Output: Dict with patches, patch_mask, row_idx, col_idx, attention_mask, etc.
     """
     def _patchify(img: torch.Tensor) -> dict:
         c, h, w = img.shape
-
-        # Step 1: Fit to token budget (resize if needed)
-        target_h, target_w = _fit_to_token_budget(h, w, patch, max_tokens, max_grid_size)
-        if (target_h, target_w) != (h, w):
-            img = TF.resize(img, [target_h, target_w], interpolation=TF.InterpolationMode.BICUBIC, antialias=True)
-            h, w = target_h, target_w
-
         orig_h, orig_w = h, w
 
-        # Step 2: Pad to patch boundary
+        # Step 1: Pad to patch boundary
         pad_h = (patch - h % patch) % patch
         pad_w = (patch - w % patch) % patch
         if pad_h > 0 or pad_w > 0:
             img = F.pad(img, (0, pad_w, 0, pad_h), mode='constant', value=0.0)
 
-        # Step 3: Unfold to patches
+        # Step 2: Unfold to patches
         c, h_padded, w_padded = img.shape
         patches = F.unfold(img.unsqueeze(0), kernel_size=patch, stride=patch)
         patches = patches.squeeze(0).T  # (N, C*patch*patch)
@@ -228,7 +246,7 @@ def patchify(
         grid_cols = w_padded // patch
         n_patches = grid_rows * grid_cols
 
-        # Step 4: Generate spatial indices
+        # Step 3: Generate spatial indices
         y_coords, x_coords = torch.meshgrid(
             torch.arange(grid_rows),
             torch.arange(grid_cols),
@@ -237,7 +255,7 @@ def patchify(
         row_idx = y_coords.flatten()
         col_idx = x_coords.flatten()
 
-        # Step 5: Pad to max_tokens
+        # Step 4: Pad to max_tokens
         patches_full = torch.zeros(max_tokens, patches.shape[1], dtype=patches.dtype)
         patches_full[:n_patches] = patches
 
@@ -252,7 +270,7 @@ def patchify(
 
         time_idx = torch.zeros(max_tokens, dtype=torch.long)
 
-        # Step 6: Create attention mask
+        # Step 5: Create attention mask
         attn_mask = patch_mask.unsqueeze(0) & patch_mask.unsqueeze(1)
         attn_mask = attn_mask | torch.eye(max_tokens, dtype=torch.bool)
 
@@ -287,7 +305,7 @@ def unpatchify(
     """Convert patches back to image tensor.
 
     Args:
-        patch_dict: Dictionary with patches, patch_mask/ptype, row_idx/yidx, col_idx/xidx
+        patch_dict: Dictionary with patches, patch_mask, row_idx, col_idx
         patch: Patch size
         max_grid_size: Optional max grid size
 
@@ -295,10 +313,9 @@ def unpatchify(
         Image tensor (B, C, H, W)
     """
     patches = patch_dict['patches']
-    # Support both old and new key names
-    mask = patch_dict.get('patch_mask', patch_dict.get('ptype'))
-    row = patch_dict.get('row_idx', patch_dict.get('yidx'))
-    col = patch_dict.get('col_idx', patch_dict.get('xidx'))
+    mask = patch_dict['patch_mask']
+    row = patch_dict['row_idx']
+    col = patch_dict['col_idx']
 
     B, N, dim = patches.shape
     C = 3
@@ -423,6 +440,7 @@ OPS = {
     "center_crop": center_crop,
     "random_resized_crop": random_resized_crop,
     "resize_longest_side": resize_longest_side,
+    "resize_to_token_budget": resize_to_token_budget,
     "flip": flip,
     "identity": identity,
     "random_choice": random_choice,
@@ -436,6 +454,7 @@ __all__ = [
     "center_crop",
     "random_resized_crop",
     "resize_longest_side",
+    "resize_to_token_budget",
     "flip",
     "identity",
     "random_choice",

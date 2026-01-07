@@ -66,7 +66,7 @@ def test_data_loading(source: str, num_batches: int = 5, batch_size: int = 4):
 
     from vitok.data import create_dataloader
 
-    pp_string = "random_resized_crop(256)|flip|to_tensor|normalize(minus_one_to_one)|patchify(256, 16, 64)"
+    pp_string = "random_resized_crop(256)|flip|to_tensor|normalize(minus_one_to_one)|patchify(16, 64)"
 
     try:
         loader = create_dataloader(
@@ -92,7 +92,7 @@ def test_data_loading(source: str, num_batches: int = 5, batch_size: int = 4):
     for i in range(num_batches):
         t0 = time.perf_counter()
         try:
-            batch, labels = next(loader_iter)
+            batch = next(loader_iter)
             elapsed = time.perf_counter() - t0
             batch_times.append(elapsed)
 
@@ -101,8 +101,10 @@ def test_data_loading(source: str, num_batches: int = 5, batch_size: int = 4):
                 print(f"    Batch keys: {list(batch.keys())}")
                 if "patches" in batch:
                     print(f"    patches shape: {batch['patches'].shape}")
-                if "ptype" in batch:
-                    print(f"    ptype shape: {batch['ptype'].shape}")
+                if "patch_mask" in batch:
+                    print(f"    patch_mask shape: {batch['patch_mask'].shape}")
+                if "label" in batch:
+                    print(f"    label shape: {batch['label'].shape}")
             else:
                 print(f"    Batch {i+1}: {elapsed:.2f}s")
         except StopIteration:

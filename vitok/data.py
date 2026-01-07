@@ -36,9 +36,29 @@ def patch_collate_fn(batch):
         items = [d[k] for d in batch]
         if isinstance(items[0], torch.Tensor):
             collated[k] = torch.stack(items, dim=0)
+        elif isinstance(items[0], (int, float)):
+            collated[k] = torch.tensor(items)
         else:
             collated[k] = items
     return collated
+
+
+def _decode_label(value):
+    """Parse class labels from WebDataset entries."""
+    if value is None:
+        return -1
+    if isinstance(value, bytes):
+        value = value.decode("utf-8")
+    if isinstance(value, str):
+        value = value.strip()
+        if not value:
+            return -1
+        return int(value)
+    if isinstance(value, torch.Tensor):
+        if value.numel() == 1:
+            return int(value.item())
+        return value.to(dtype=torch.long)
+    return int(value)
 
 
 def to_rgb(img: Image.Image) -> Image.Image:
@@ -84,7 +104,7 @@ def create_dataloader(
         min_size: Optional minimum image dimension filter
 
     Returns:
-        WebLoader yielding batch dicts
+        WebLoader yielding batch dicts with 'label' key (class label, -1 if unavailable)
     """
     transform = build_transform(pp)
     urls = _resolve_source(source, seed)
@@ -94,12 +114,20 @@ def create_dataloader(
     rank = dist.get_rank() if dist.is_initialized() else 0
     shuffle_seed = seed + rank
 
+    def _transform_sample(s):
+        """Transform image and include label in output dict."""
+        patch_dict = transform(s["image"])
+        # Get label from cls or cls.txt field, default to -1
+        label = s.get("cls") or s.get("cls.txt")
+        patch_dict["label"] = _decode_label(label)
+        return patch_dict
+
     # Build pipeline
     dataset = (
         wds.WebDataset(urls, resampled=True, handler=wds.ignore_and_continue)
         .shuffle(shuffle_buffer, seed=shuffle_seed)
         .decode("pil", handler=wds.ignore_and_continue)
-        .rename(image="jpg;jpeg;png;webp")
+        .rename(image="jpg;jpeg;png;webp", keep=True)  # keep=True preserves other fields like cls
         .map_dict(image=to_rgb)
     )
 
@@ -108,7 +136,7 @@ def create_dataloader(
 
     dataset = (
         dataset
-        .map(lambda s: transform(s["image"]))
+        .map(_transform_sample)
         .batched(batch_size, partial=False, collation_fn=patch_collate_fn)
     )
 
@@ -178,6 +206,11 @@ def _hf_to_urls(source: str, seed: int = 0) -> list[str]:
     return [f"pipe:curl -sL https://huggingface.co/datasets/{repo}/resolve/main/{rel}{auth}"]
 
 
+def _get_hf_shard_urls(source: str, seed: int = 0) -> list[str]:
+    """Backwards-compatible alias for _hf_to_urls."""
+    return _hf_to_urls(source, seed)
+
+
 def _local_to_urls(source: str, seed: int = 0) -> list[str]:
     """Resolve local path to list of tar files.
 
@@ -204,4 +237,8 @@ def _local_to_urls(source: str, seed: int = 0) -> list[str]:
     return urls
 
 
-__all__ = ["create_dataloader", "patch_collate_fn", "to_rgb"]
+__all__ = [
+    "create_dataloader",
+    "patch_collate_fn",
+    "to_rgb",
+]

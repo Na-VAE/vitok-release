@@ -60,8 +60,6 @@ def main():
     parser.add_argument("--max_size", type=int, default=256)
     parser.add_argument("--patch_size", type=int, default=16)
     parser.add_argument("--max_tokens", type=int, default=256)
-    parser.add_argument("--square_crop_prob", type=float, default=0.5,
-                        help="Probability of using square crop vs native aspect ratio")
 
     # Model
     parser.add_argument("--variant", type=str, default="Ld2-Ld22/1x16x64",
@@ -216,35 +214,15 @@ def main():
     if rank == 0:
         print(f"Loading data from: {args.data}")
 
-    # Build preprocessing string with square crop probability
-    # We use a mixed approach: sometimes square crop, sometimes native aspect ratio
-    if not 0.0 <= args.square_crop_prob <= 1.0:
-        raise ValueError("--square_crop_prob must be between 0 and 1")
-
-    if args.square_crop_prob <= 0:
-        # Native aspect ratio (naflex-style)
-        pp_string = (
-            f"to_tensor|"
-            f"normalize(minus_one_to_one)|"
-            f"patchify({args.max_size}, {args.patch_size}, {args.max_tokens})"
-        )
-    elif args.square_crop_prob >= 1:
-        pp_string = (
-            f"random_resized_crop({args.max_size})|"
-            f"flip|"
-            f"to_tensor|"
-            f"normalize(minus_one_to_one)|"
-            f"patchify({args.max_size}, {args.patch_size}, {args.max_tokens})"
-        )
-    else:
-        p = args.square_crop_prob
-        pp_string = (
-            f"random_choice(ops=['random_resized_crop({args.max_size})', 'identity'], probs=[{p}, {1.0 - p}])|"
-            f"flip|"
-            f"to_tensor|"
-            f"normalize(minus_one_to_one)|"
-            f"patchify({args.max_size}, {args.patch_size}, {args.max_tokens})"
-        )
+    # Build preprocessing string: 25% square crop, 75% native aspect ratio
+    pp_string = (
+        f"random_choice(ops=['random_resized_crop({args.max_size})', 'identity'], probs=[0.25, 0.75])|"
+        f"flip|"
+        f"to_tensor|"
+        f"normalize(minus_one_to_one)|"
+        f"resize_to_token_budget({args.patch_size}, {args.max_tokens})|"
+        f"patchify({args.patch_size}, {args.max_tokens})"
+    )
 
     loader = create_dataloader(
         source=args.data, pp=pp_string, batch_size=args.batch_size,
@@ -294,10 +272,10 @@ def main():
 
     while step < args.steps:
         try:
-            batch, _ = next(loader_iter)
+            batch = next(loader_iter)
         except StopIteration:
             loader_iter = iter(loader)
-            batch, _ = next(loader_iter)
+            batch = next(loader_iter)
         batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
         if 'patches' in batch:
             batch['patches'] = batch['patches'].to(dtype)
@@ -308,12 +286,12 @@ def main():
         with torch.autocast(device_type='cuda', dtype=dtype):
             decode_dict = model(batch)
 
-        ptype = batch['ptype']
+        patch_mask = batch['patch_mask']
         diff = decode_dict['patches'] - batch['patches']
         diff_f32 = diff.float()
         charb_per_token = (diff_f32.pow(2) + args.charbonnier_eps**2).sqrt().mean(dim=2)
-        charb_per_token = charb_per_token * ptype.float()
-        actual_tokens = ptype.sum(dim=1).clamp_min(1).float()
+        charb_per_token = charb_per_token * patch_mask.float()
+        actual_tokens = patch_mask.sum(dim=1).clamp_min(1).float()
         charb_loss = (charb_per_token.sum(dim=1) / actual_tokens).mean()
 
         loss = args.charbonnier * charb_loss
@@ -337,8 +315,8 @@ def main():
                 )
 
             # Sample tiles for perceptual losses
-            orig_h = batch['original_height'].to(device)
-            orig_w = batch['original_width'].to(device)
+            orig_h = batch['orig_height'].to(device)
+            orig_w = batch['orig_width'].to(device)
             tiles_ref, tile_indices = sample_tiles(
                 ref_images, orig_h, orig_w,
                 n_tiles=args.n_tiles, tile_size=(args.tile_size, args.tile_size)
@@ -436,10 +414,10 @@ def main():
             with torch.no_grad():
                 for _ in range(n_eval_batches):
                     try:
-                        eval_batch, _ = next(use_eval_iter)
+                        eval_batch = next(use_eval_iter)
                     except StopIteration:
-                        eval_iter = iter(eval_loader)
-                        eval_batch, _ = next(use_eval_iter)
+                        use_eval_iter = iter(eval_loader) if eval_loader else iter(loader)
+                        eval_batch = next(use_eval_iter)
 
                     eval_batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in eval_batch.items()}
                     if 'patches' in eval_batch:

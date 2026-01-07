@@ -97,20 +97,20 @@ def benchmark_mfu(
     # Create synthetic batch
     max_grid = 512 // 16  # 32x32 grid
     patches = torch.randn(batch_size, max_tokens, 3 * 16 * 16, device=device, dtype=dtype)
-    ptype = torch.ones(batch_size, max_tokens, device=device, dtype=torch.bool)
-    yidx = torch.randint(0, max_grid, (batch_size, max_tokens), device=device)
-    xidx = torch.randint(0, max_grid, (batch_size, max_tokens), device=device)
+    patch_mask = torch.ones(batch_size, max_tokens, device=device, dtype=torch.bool)
+    row_idx = torch.randint(0, max_grid, (batch_size, max_tokens), device=device)
+    col_idx = torch.randint(0, max_grid, (batch_size, max_tokens), device=device)
     # Required by decode()
-    original_height = torch.full((batch_size,), 512, device=device, dtype=torch.long)
-    original_width = torch.full((batch_size,), 512, device=device, dtype=torch.long)
+    orig_height = torch.full((batch_size,), 512, device=device, dtype=torch.long)
+    orig_width = torch.full((batch_size,), 512, device=device, dtype=torch.long)
 
     synthetic_batch = {
         "patches": patches,
-        "ptype": ptype,
-        "yidx": yidx,
-        "xidx": xidx,
-        "original_height": original_height,
-        "original_width": original_width,
+        "patch_mask": patch_mask,
+        "row_idx": row_idx,
+        "col_idx": col_idx,
+        "orig_height": orig_height,
+        "orig_width": orig_width,
     }
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, fused=True)
