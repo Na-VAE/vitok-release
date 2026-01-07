@@ -83,9 +83,9 @@ def test_naflex_dict_format(test_tar_path):
         assert key in batch, f"Missing key: {key}"
 
     # Check for either old or new key names
-    assert 'ptype' in batch or 'patch_mask' in batch, "Missing patch type/mask key"
-    assert 'yidx' in batch or 'row_idx' in batch, "Missing row index key"
-    assert 'xidx' in batch or 'col_idx' in batch, "Missing col index key"
+    assert 'patch_mask' in batch or 'patch_mask' in batch, "Missing patch type/mask key"
+    assert 'row_idx' in batch or 'row_idx' in batch, "Missing row index key"
+    assert 'col_idx' in batch or 'col_idx' in batch, "Missing col index key"
 
     # Verify shapes
     B = batch['patches'].shape[0]
@@ -93,17 +93,17 @@ def test_naflex_dict_format(test_tar_path):
 
     assert batch['patches'].ndim == 3, "patches should be [B, L, C]"
 
-    ptype_key = 'ptype' if 'ptype' in batch else 'patch_mask'
-    yidx_key = 'yidx' if 'yidx' in batch else 'row_idx'
-    xidx_key = 'xidx' if 'xidx' in batch else 'col_idx'
+    ptype_key = 'patch_mask' if 'patch_mask' in batch else 'patch_mask'
+    yidx_key = 'row_idx' if 'row_idx' in batch else 'row_idx'
+    xidx_key = 'col_idx' if 'col_idx' in batch else 'col_idx'
 
     assert batch[ptype_key].shape == (B, L), f"patch_mask shape mismatch: {batch[ptype_key].shape}"
     assert batch[yidx_key].shape == (B, L), f"row_idx shape mismatch: {batch[yidx_key].shape}"
     assert batch[xidx_key].shape == (B, L), f"col_idx shape mismatch: {batch[xidx_key].shape}"
 
     # Verify original size metadata
-    assert 'orig_height' in batch or 'original_height' in batch
-    assert 'orig_width' in batch or 'original_width' in batch
+    assert 'orig_height' in batch or 'orig_height' in batch
+    assert 'orig_width' in batch or 'orig_width' in batch
 
     print("NaFlex dictionary format verified!")
     print(f"  Batch size: {B}")

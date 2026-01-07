@@ -123,7 +123,7 @@ def _sync_code_to_volume():
 # 8xA100 function for production training
 @app.function(
     image=base_image,
-    gpu="A100-80GB:8",
+    gpu="A100:8",
     timeout=86400,  # 24 hours
     volumes={
         "/checkpoints": checkpoint_volume,
@@ -166,7 +166,6 @@ def train_vae(
         "--eval_freq", str(eval_freq),
         "--output_dir", "/checkpoints/vae",
         "--save_freq", "5000",
-        "--marked_freq", "0",
         "--fsdp",  # Enable FSDP for multi-GPU
     ]
 
@@ -183,10 +182,10 @@ def train_vae(
     return result.returncode
 
 
-# A100 single GPU function for debug/testing
+# 4xA10G function for debug/testing (cheaper than A100)
 @app.function(
     image=base_image,
-    gpu="A100-80GB",
+    gpu="A10G:4",
     timeout=7200,  # 2 hours
     volumes={
         "/checkpoints": checkpoint_volume,
@@ -201,11 +200,11 @@ def train_vae_debug(
     steps: int = 5000,
     log_freq: int = 50,
     eval_freq: int = 500,
-    batch_size: int = 256,
+    batch_size: int = 64,  # Per GPU, total = 64*4 = 256
     wandb_project: str = None,
     wandb_name: str = None,
 ):
-    """Run VAE training on single A100 (for testing/debug)."""
+    """Run VAE training on 4xA10G with FSDP (for testing/debug)."""
     import subprocess
     import os
 
@@ -215,7 +214,10 @@ def train_vae_debug(
     data_source = "hf://timm/imagenet-22k-wds/imagenet22k-train-{0000..0049}.tar"
 
     cmd = [
-        "python", "scripts/train_vae.py",
+        "torchrun",
+        "--nproc_per_node=4",
+        "--master_port=29500",
+        "scripts/train_vae.py",
         "--data", data_source,
         "--steps", str(steps),
         "--batch_size", str(batch_size),
@@ -225,7 +227,7 @@ def train_vae_debug(
         "--eval_freq", str(eval_freq),
         "--output_dir", "/checkpoints/vae-debug",
         "--save_freq", "5000",
-        "--marked_freq", "0",
+        "--fsdp",  # Enable FSDP for multi-GPU
     ]
 
     if wandb_project:
@@ -233,7 +235,7 @@ def train_vae_debug(
     if wandb_name:
         cmd.extend(["--wandb_name", wandb_name])
 
-    print(f"Running command:")
+    print(f"Running on 4xA10G with FSDP:")
     print(f"  {' '.join(cmd)}")
     print()
 
@@ -264,7 +266,7 @@ def main(
         wandb_name: Optional wandb run name
         sync: Sync code before running (default: False)
         sync_only: Only sync code, don't run training (default: False)
-        debug: Debug mode - uses 1xA100 with smaller settings (default: False)
+        debug: Debug mode - uses 4xA10G with smaller dataset (default: False)
     """
     # Sync code if requested
     if sync or sync_only:
@@ -274,20 +276,20 @@ def main(
             print("  modal run scripts/modal_train_vae.py")
             return
 
-    n_gpus = 1 if debug else 8
+    n_gpus = 4 if debug else 8
     total_batch = batch_size * n_gpus
 
     print("=" * 60)
     print("ViTok VAE Training on Modal")
     print("=" * 60)
     print(f"  Model: Ld2-Ld22/1x16x64")
-    print(f"  GPU: {'1xA100-80GB (debug)' if debug else '8xA100-80GB'}")
+    print(f"  GPU: {'4xA10G (debug)' if debug else '8xA100'}")
     print(f"  Steps: {steps}")
     print(f"  Batch size: {batch_size} x {n_gpus} = {total_batch}")
     print(f"  Log freq: {log_freq}")
     print(f"  Eval freq: {eval_freq}")
     print(f"  Train data: ImageNet-22k ({'50 shards' if debug else '1024 shards'})")
-    print(f"  FSDP: {'No' if debug else 'Yes'}")
+    print(f"  FSDP: Yes")
     if wandb_project:
         print(f"  WandB: {wandb_project}/{wandb_name or 'auto'}")
     print("=" * 60)
@@ -295,13 +297,13 @@ def main(
 
     # Estimate cost
     if debug:
-        # 1xA100: ~$4.50/hr, ~0.3 sec/step
-        sec_per_step = 0.3
-        hourly_rate = 4.50
+        # 4xA10G: ~$4.40/hr (~$1.10/hr each), ~0.15 sec/step at bs=256
+        sec_per_step = 0.15
+        hourly_rate = 4.40
     else:
-        # 8xA100: ~$36/hr, ~0.05 sec/step at bs=512
+        # 8xA100-40GB: ~$24/hr (~$3/hr each), ~0.05 sec/step at bs=512
         sec_per_step = 0.05
-        hourly_rate = 36.0
+        hourly_rate = 24.0
 
     est_time_min = steps * sec_per_step / 60
     est_cost = est_time_min / 60 * hourly_rate

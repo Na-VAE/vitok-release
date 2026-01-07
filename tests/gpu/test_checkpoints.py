@@ -166,11 +166,11 @@ def test_load_l_model(folder_name: str, variant: str):
 
     decode_input = {
         'z': torch.randn(batch_size, seq_len, channels).cuda(),
-        'ptype': torch.ones(batch_size, seq_len, dtype=torch.bool).cuda(),
-        'yidx': y.flatten().unsqueeze(0).expand(batch_size, -1).cuda(),
-        'xidx': x.flatten().unsqueeze(0).expand(batch_size, -1).cuda(),
-        'original_height': torch.full((batch_size,), grid_size * spatial_stride).cuda(),
-        'original_width': torch.full((batch_size,), grid_size * spatial_stride).cuda(),
+        'patch_mask': torch.ones(batch_size, seq_len, dtype=torch.bool).cuda(),
+        'row_idx': y.flatten().unsqueeze(0).expand(batch_size, -1).cuda(),
+        'col_idx': x.flatten().unsqueeze(0).expand(batch_size, -1).cuda(),
+        'orig_height': torch.full((batch_size,), grid_size * spatial_stride).cuda(),
+        'orig_width': torch.full((batch_size,), grid_size * spatial_stride).cuda(),
     }
 
     # Forward pass (decode)
@@ -247,11 +247,11 @@ def test_load_t_model(folder_name: str, variant: str):
 
     decode_input = {
         'z': torch.randn(batch_size, seq_len, channels, dtype=torch.bfloat16).cuda(),
-        'ptype': torch.ones(batch_size, seq_len, dtype=torch.bool).cuda(),
-        'yidx': y.flatten().unsqueeze(0).expand(batch_size, -1).cuda(),
-        'xidx': x.flatten().unsqueeze(0).expand(batch_size, -1).cuda(),
-        'original_height': torch.full((batch_size,), grid_size * spatial_stride).cuda(),
-        'original_width': torch.full((batch_size,), grid_size * spatial_stride).cuda(),
+        'patch_mask': torch.ones(batch_size, seq_len, dtype=torch.bool).cuda(),
+        'row_idx': y.flatten().unsqueeze(0).expand(batch_size, -1).cuda(),
+        'col_idx': x.flatten().unsqueeze(0).expand(batch_size, -1).cuda(),
+        'orig_height': torch.full((batch_size,), grid_size * spatial_stride).cuda(),
+        'orig_width': torch.full((batch_size,), grid_size * spatial_stride).cuda(),
     }
 
     # Forward pass (decode)

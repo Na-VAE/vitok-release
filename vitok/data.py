@@ -23,14 +23,6 @@ from PIL import Image, ImageOps
 from vitok.pp import build_transform
 
 
-def unpack_batch(batch_data):
-    """Extract patch dict from dataloader output.
-
-    Handles both tuple (patch_dict, labels) and plain dict returns.
-    """
-    return batch_data[0] if isinstance(batch_data, tuple) else batch_data
-
-
 def patch_collate_fn(batch):
     """Collate patch dicts into batched tensors."""
     if not batch:
@@ -44,33 +36,23 @@ def patch_collate_fn(batch):
         items = [d[k] for d in batch]
         if isinstance(items[0], torch.Tensor):
             collated[k] = torch.stack(items, dim=0)
+        elif isinstance(items[0], (int, float)):
+            collated[k] = torch.tensor(items)
         else:
             collated[k] = items
     return collated
 
 
-def patch_collate_with_labels(batch):
-    """Collate (patch_dict, label) tuples into batched tensors + labels."""
-    if not batch:
-        return {}, torch.empty(0, dtype=torch.long)
-
-    patch_dicts = [item[0] for item in batch]
-    labels = [item[1] for item in batch]
-    collated = patch_collate_fn(patch_dicts)
-
-    if isinstance(labels[0], torch.Tensor):
-        labels = torch.stack(labels, dim=0)
-    else:
-        labels = torch.tensor(labels, dtype=torch.long)
-    return collated, labels
-
-
 def _decode_label(value):
     """Parse class labels from WebDataset entries."""
+    if value is None:
+        return -1
     if isinstance(value, bytes):
         value = value.decode("utf-8")
     if isinstance(value, str):
         value = value.strip()
+        if not value:
+            return -1
         return int(value)
     if isinstance(value, torch.Tensor):
         if value.numel() == 1:
@@ -106,7 +88,6 @@ def create_dataloader(
     seed: int = 0,
     shuffle_buffer: int = 10000,
     min_size: Optional[int] = None,
-    return_labels: bool = False,
 ) -> wds.WebLoader:
     """Create a dataloader from source with preprocessing.
 
@@ -123,7 +104,7 @@ def create_dataloader(
         min_size: Optional minimum image dimension filter
 
     Returns:
-        WebLoader yielding batch dicts
+        WebLoader yielding batch dicts with 'label' key (class label, -1 if unavailable)
     """
     transform = build_transform(pp)
     urls = _resolve_source(source, seed)
@@ -133,35 +114,31 @@ def create_dataloader(
     rank = dist.get_rank() if dist.is_initialized() else 0
     shuffle_seed = seed + rank
 
+    def _transform_sample(s):
+        """Transform image and include label in output dict."""
+        patch_dict = transform(s["image"])
+        # Get label from cls or cls.txt field, default to -1
+        label = s.get("cls") or s.get("cls.txt")
+        patch_dict["label"] = _decode_label(label)
+        return patch_dict
+
     # Build pipeline
     dataset = (
         wds.WebDataset(urls, resampled=True, handler=wds.ignore_and_continue)
         .shuffle(shuffle_buffer, seed=shuffle_seed)
         .decode("pil", handler=wds.ignore_and_continue)
+        .rename(image="jpg;jpeg;png;webp", keep=True)  # keep=True preserves other fields like cls
+        .map_dict(image=to_rgb)
     )
-
-    if return_labels:
-        dataset = dataset.rename(image="jpg;jpeg;png;webp", label="cls;cls.txt")
-        dataset = dataset.map_dict(image=to_rgb, label=_decode_label)
-    else:
-        dataset = dataset.rename(image="jpg;jpeg;png;webp")
-        dataset = dataset.map_dict(image=to_rgb)
 
     if min_size is not None:
         dataset = dataset.select(lambda s: min(s["image"].size) >= min_size)
 
-    if return_labels:
-        dataset = (
-            dataset
-            .map(lambda s: (transform(s["image"]), s["label"]))
-            .batched(batch_size, partial=False, collation_fn=patch_collate_with_labels)
-        )
-    else:
-        dataset = (
-            dataset
-            .map(lambda s: transform(s["image"]))
-            .batched(batch_size, partial=False, collation_fn=patch_collate_fn)
-        )
+    dataset = (
+        dataset
+        .map(_transform_sample)
+        .batched(batch_size, partial=False, collation_fn=patch_collate_fn)
+    )
 
     return wds.WebLoader(
         dataset,
@@ -263,7 +240,5 @@ def _local_to_urls(source: str, seed: int = 0) -> list[str]:
 __all__ = [
     "create_dataloader",
     "patch_collate_fn",
-    "patch_collate_with_labels",
     "to_rgb",
-    "unpack_batch",
 ]

@@ -34,7 +34,7 @@ from torch.distributed._composable.fsdp import fully_shard, MixedPrecisionPolicy
 from tqdm import tqdm
 
 from vitok import AE, decode_variant
-from vitok.data import create_dataloader, unpack_batch
+from vitok.data import create_dataloader
 from vitok.pp.io import postprocess
 from vitok.pp import sample_tiles
 from vitok import utils as tu
@@ -226,7 +226,8 @@ def main():
         pp_string = (
             f"to_tensor|"
             f"normalize(minus_one_to_one)|"
-            f"patchify({args.max_size}, {args.patch_size}, {args.max_tokens})"
+            f"resize_to_token_budget({args.patch_size}, {args.max_tokens})|"
+            f"patchify({args.patch_size}, {args.max_tokens})"
         )
     elif args.square_crop_prob >= 1:
         pp_string = (
@@ -234,7 +235,7 @@ def main():
             f"flip|"
             f"to_tensor|"
             f"normalize(minus_one_to_one)|"
-            f"patchify({args.max_size}, {args.patch_size}, {args.max_tokens})"
+            f"patchify({args.patch_size}, {args.max_tokens})"
         )
     else:
         p = args.square_crop_prob
@@ -243,7 +244,8 @@ def main():
             f"flip|"
             f"to_tensor|"
             f"normalize(minus_one_to_one)|"
-            f"patchify({args.max_size}, {args.patch_size}, {args.max_tokens})"
+            f"resize_to_token_budget({args.patch_size}, {args.max_tokens})|"
+            f"patchify({args.patch_size}, {args.max_tokens})"
         )
 
     loader = create_dataloader(
@@ -294,11 +296,10 @@ def main():
 
     while step < args.steps:
         try:
-            batch_data = next(loader_iter)
+            batch = next(loader_iter)
         except StopIteration:
             loader_iter = iter(loader)
-            batch_data = next(loader_iter)
-        batch = unpack_batch(batch_data)
+            batch = next(loader_iter)
         batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
         if 'patches' in batch:
             batch['patches'] = batch['patches'].to(dtype)
@@ -309,12 +310,12 @@ def main():
         with torch.autocast(device_type='cuda', dtype=dtype):
             decode_dict = model(batch)
 
-        ptype = batch['ptype']
+        patch_mask = batch['patch_mask']
         diff = decode_dict['patches'] - batch['patches']
         diff_f32 = diff.float()
         charb_per_token = (diff_f32.pow(2) + args.charbonnier_eps**2).sqrt().mean(dim=2)
-        charb_per_token = charb_per_token * ptype.float()
-        actual_tokens = ptype.sum(dim=1).clamp_min(1).float()
+        charb_per_token = charb_per_token * patch_mask.float()
+        actual_tokens = patch_mask.sum(dim=1).clamp_min(1).float()
         charb_loss = (charb_per_token.sum(dim=1) / actual_tokens).mean()
 
         loss = args.charbonnier * charb_loss
@@ -338,8 +339,8 @@ def main():
                 )
 
             # Sample tiles for perceptual losses
-            orig_h = batch['original_height'].to(device)
-            orig_w = batch['original_width'].to(device)
+            orig_h = batch['orig_height'].to(device)
+            orig_w = batch['orig_width'].to(device)
             tiles_ref, tile_indices = sample_tiles(
                 ref_images, orig_h, orig_w,
                 n_tiles=args.n_tiles, tile_size=(args.tile_size, args.tile_size)
@@ -437,11 +438,10 @@ def main():
             with torch.no_grad():
                 for _ in range(n_eval_batches):
                     try:
-                        eval_data = next(use_eval_iter)
+                        eval_batch = next(use_eval_iter)
                     except StopIteration:
                         use_eval_iter = iter(eval_loader) if eval_loader else iter(loader)
-                        eval_data = next(use_eval_iter)
-                    eval_batch = unpack_batch(eval_data)
+                        eval_batch = next(use_eval_iter)
 
                     eval_batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in eval_batch.items()}
                     if 'patches' in eval_batch:

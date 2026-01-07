@@ -218,9 +218,9 @@ class DiT(nn.Module):
         seq_len: int,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Compute 2D RoPE frequencies from positions or infer from sequence length."""
-        if 'yidx' in dit_dict and 'xidx' in dit_dict:
-            yidx = dit_dict['yidx'].to(device=device, dtype=torch.float32)
-            xidx = dit_dict['xidx'].to(device=device, dtype=torch.float32)
+        if 'row_idx' in dit_dict and 'col_idx' in dit_dict:
+            yidx = dit_dict['row_idx'].to(device=device, dtype=torch.float32)
+            xidx = dit_dict['col_idx'].to(device=device, dtype=torch.float32)
             # Handle unbatched positions
             if yidx.ndim == 1:
                 yidx = yidx.unsqueeze(0).expand(batch_size, -1)

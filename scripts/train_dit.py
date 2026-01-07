@@ -234,7 +234,6 @@ def main():
         batch_size=config.batch_size,
         num_workers=config.num_workers,
         seed=config.seed + start_step,
-        return_labels=True,
     )
 
     data_iter = iter(dataloader)
@@ -264,17 +263,17 @@ def main():
 
         # Get batch
         try:
-            patch_dict, labels = next(data_iter)
+            patch_dict = next(data_iter)
         except StopIteration:
             data_iter = iter(dataloader)
-            patch_dict, labels = next(data_iter)
+            patch_dict = next(data_iter)
 
         # Move to device
         patch_dict = {
             k: v.to(device, non_blocking=True) if isinstance(v, torch.Tensor) else v
             for k, v in patch_dict.items()
         }
-        labels = labels.to(device)
+        labels = patch_dict['label']
 
         # Learning rate schedule
         if step < warmup_steps:

@@ -52,11 +52,11 @@ def test_ae_quick():
 
     test_input = {
         'patches': torch.randn(batch_size, seq_len, C).cuda(),
-        'ptype': torch.ones(batch_size, seq_len, dtype=torch.bool).cuda(),
-        'yidx': y.flatten().unsqueeze(0).expand(batch_size, -1).cuda(),
-        'xidx': x.flatten().unsqueeze(0).expand(batch_size, -1).cuda(),
-        'original_height': torch.full((batch_size,), grid_size * patch_size).cuda(),
-        'original_width': torch.full((batch_size,), grid_size * patch_size).cuda(),
+        'patch_mask': torch.ones(batch_size, seq_len, dtype=torch.bool).cuda(),
+        'row_idx': y.flatten().unsqueeze(0).expand(batch_size, -1).cuda(),
+        'col_idx': x.flatten().unsqueeze(0).expand(batch_size, -1).cuda(),
+        'orig_height': torch.full((batch_size,), grid_size * patch_size).cuda(),
+        'orig_width': torch.full((batch_size,), grid_size * patch_size).cuda(),
         'attention_mask': None,
     }
 
@@ -93,8 +93,8 @@ def test_dit_quick():
         'z': torch.randn(batch_size, seq_len, code_width).cuda(),
         't': torch.randint(0, 1000, (batch_size,)).float().cuda(),
         'context': torch.randint(0, 1000, (batch_size,)).cuda(),
-        'yidx': y.flatten().unsqueeze(0).expand(batch_size, -1).cuda(),
-        'xidx': x.flatten().unsqueeze(0).expand(batch_size, -1).cuda(),
+        'row_idx': y.flatten().unsqueeze(0).expand(batch_size, -1).cuda(),
+        'col_idx': x.flatten().unsqueeze(0).expand(batch_size, -1).cuda(),
     }
 
     with torch.no_grad():
