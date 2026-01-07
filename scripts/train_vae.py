@@ -34,7 +34,7 @@ from torch.distributed._composable.fsdp import fully_shard, MixedPrecisionPolicy
 from tqdm import tqdm
 
 from vitok import AE, decode_variant
-from vitok.data import create_dataloader
+from vitok.data import create_dataloader, unpack_batch
 from vitok.pp.io import postprocess
 from vitok.pp import sample_tiles
 from vitok import utils as tu
@@ -294,10 +294,11 @@ def main():
 
     while step < args.steps:
         try:
-            batch, _ = next(loader_iter)
+            batch_data = next(loader_iter)
         except StopIteration:
             loader_iter = iter(loader)
-            batch, _ = next(loader_iter)
+            batch_data = next(loader_iter)
+        batch = unpack_batch(batch_data)
         batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
         if 'patches' in batch:
             batch['patches'] = batch['patches'].to(dtype)
@@ -436,10 +437,11 @@ def main():
             with torch.no_grad():
                 for _ in range(n_eval_batches):
                     try:
-                        eval_batch, _ = next(use_eval_iter)
+                        eval_data = next(use_eval_iter)
                     except StopIteration:
-                        eval_iter = iter(eval_loader)
-                        eval_batch, _ = next(use_eval_iter)
+                        use_eval_iter = iter(eval_loader) if eval_loader else iter(loader)
+                        eval_data = next(use_eval_iter)
+                    eval_batch = unpack_batch(eval_data)
 
                     eval_batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in eval_batch.items()}
                     if 'patches' in eval_batch:
