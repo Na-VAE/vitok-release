@@ -11,7 +11,7 @@ import torch
 from vitok import AE, decode_variant
 from safetensors.torch import load_file
 
-from vitok.utils import setup_distributed, cleanup_distributed
+from vitok.utils import setup_distributed
 from vitok.data import create_dataloader
 from vitok.naflex_io import postprocess
 from vitok.evaluators import MetricCalculator
@@ -29,7 +29,7 @@ def main():
     args = parser.parse_args()
 
     # Setup distributed
-    rank, world_size, device = setup_distributed()
+    rank, world_size, _, device, _ = setup_distributed()
     dtype = torch.bfloat16 if torch.cuda.is_available() else torch.float32
 
     if rank == 0:

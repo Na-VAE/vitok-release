@@ -33,10 +33,10 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed._composable.fsdp import fully_shard, MixedPrecisionPolicy
 from tqdm import tqdm
 
-from vitok import create_ae
+from vitok import AE, decode_variant
 from vitok.data import create_dataloader
 from vitok.naflex_io import postprocess, RandomTileSampler
-from vitok import training_utils as tu
+from vitok import utils as tu
 from vitok.evaluators import MetricCalculator
 
 # Perceptual losses
@@ -137,7 +137,7 @@ def main():
     # Create model
     if rank == 0:
         print(f"Creating AE model: {args.variant}")
-    model = create_ae(args.variant)
+    model = AE(**decode_variant(args.variant))
     if rank == 0:
         print("[DEBUG] Model created, moving to device...")
     model.to(device=device, dtype=dtype)
