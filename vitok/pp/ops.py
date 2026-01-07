@@ -11,7 +11,8 @@ All ops follow the factory pattern:
 from __future__ import annotations
 
 import math
-from typing import Tuple
+import random
+from typing import Sequence, Tuple
 
 import torch
 import torch.nn.functional as F
@@ -85,6 +86,39 @@ def random_resized_crop(
 def flip(p: float = 0.5):
     """Random horizontal flip with probability p."""
     return T.RandomHorizontalFlip(p)
+
+
+# =============================================================================
+# Composition ops
+# =============================================================================
+
+
+def identity():
+    """No-op transform."""
+    def _identity(x):
+        return x
+    return _identity
+
+
+def random_choice(ops: Sequence[str], probs: Sequence[float]):
+    """Randomly apply one of several ops.
+
+    Args:
+        ops: Sequence of op spec strings (e.g., ['random_resized_crop(256)', 'identity'])
+        probs: Probability weights (same length as ops)
+    """
+    from vitok.pp.registry import parse_op
+
+    resolved = []
+    for op in ops:
+        name, args, kwargs = parse_op(op)
+        resolved.append(OPS[name](*args, **kwargs))
+
+    def _random_choice(x):
+        idx = random.choices(range(len(resolved)), weights=probs, k=1)[0]
+        return resolved[idx](x)
+
+    return _random_choice
 
 
 # =============================================================================
@@ -390,6 +424,8 @@ OPS = {
     "random_resized_crop": random_resized_crop,
     "resize_longest_side": resize_longest_side,
     "flip": flip,
+    "identity": identity,
+    "random_choice": random_choice,
     "to_tensor": to_tensor,
     "normalize": normalize,
     "patchify": patchify,
@@ -401,6 +437,8 @@ __all__ = [
     "random_resized_crop",
     "resize_longest_side",
     "flip",
+    "identity",
+    "random_choice",
     "to_tensor",
     "normalize",
     "patchify",
