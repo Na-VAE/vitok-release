@@ -1,6 +1,6 @@
 """Run ViTok AE inference on Modal.
 
-This script downloads pretrained weights and runs encode/decode on an image.
+This script downloads pretrained weights and runs encode/decode on images or videos.
 Weights are cached in a Modal volume for fast subsequent runs.
 
 Usage:
@@ -15,6 +15,12 @@ Usage:
 
     # Save output locally
     modal run scripts/modal/inference.py --output reconstructed.png
+
+    # Video inference
+    modal run scripts/modal/inference.py --video path/to/video.mp4 --max-frames 8 --output-dir output/
+
+    # Video from directory of frames
+    modal run scripts/modal/inference.py --video frames_dir/ --max-frames 16 --output-dir output/
 
     # List available models
     modal run scripts/modal/inference.py --list-models
@@ -168,11 +174,159 @@ def run_inference(model_name: str, image_bytes: bytes | None = None) -> tuple[by
     return out_bytes, info
 
 
+@app.function(
+    image=image,
+    gpu="T4",
+    volumes={"/cache": vol},
+    timeout=600,
+)
+def run_video_inference(
+    model_name: str,
+    video_bytes: bytes | None = None,
+    frame_paths: list[str] | None = None,
+    max_frames: int = 8,
+    temporal_stride: int = 1,
+) -> tuple[list[bytes], dict]:
+    """Run AE encode/decode on video frames.
+
+    Processes video in batch mode - each frame is encoded/decoded independently.
+
+    Args:
+        model_name: Pretrained model name (e.g., "L-64", "T-128")
+        video_bytes: Video file bytes (.mp4, etc.). Mutually exclusive with frame_paths.
+        frame_paths: List of frame image paths. Mutually exclusive with video_bytes.
+        max_frames: Maximum number of frames to process
+        temporal_stride: Sample every Nth frame (currently only stride=1)
+
+    Returns:
+        Tuple of (list_of_frame_bytes, info_dict)
+    """
+    import io
+    import os
+    import tempfile
+    import torch
+    import numpy as np
+    from PIL import Image
+    from safetensors.torch import load_file
+
+    # Add vitok to path
+    sys.path.insert(0, "/root/vitok-release")
+
+    from vitok import AE, decode_variant, postprocess
+    from vitok.pretrained import download_pretrained, get_pretrained_info
+    from vitok.video import extract_frames
+    from vitok.pp import preprocess_video, postprocess_video
+
+    # Get model info
+    repo_id, filename, variant = get_pretrained_info(model_name)
+    print(f"Model: {model_name}")
+    print(f"  Variant: {variant}")
+
+    # Download weights
+    os.environ["HF_HOME"] = "/cache/huggingface"
+    print("\nDownloading weights (or using cache)...")
+    weights_path = download_pretrained(model_name)
+    vol.commit()
+
+    # Load model
+    print("\nLoading model...")
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    dtype = torch.bfloat16 if device == "cuda" else torch.float32
+    weights = load_file(weights_path)
+
+    encoder = AE(**decode_variant(variant), decoder=False)
+    encoder.to(device=device, dtype=dtype)
+    encoder.load_state_dict(weights, strict=False)
+    encoder.eval()
+
+    decoder = AE(**decode_variant(variant), encoder=False)
+    decoder.to(device=device, dtype=dtype)
+    decoder.load_state_dict(weights, strict=False)
+    decoder.eval()
+
+    # Extract frames from video or load from paths
+    if video_bytes is not None:
+        # Save video to temp file and extract frames
+        with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as f:
+            f.write(video_bytes)
+            temp_path = f.name
+        try:
+            frames = extract_frames(temp_path, max_frames=max_frames, temporal_stride=temporal_stride)
+        finally:
+            os.unlink(temp_path)
+        print(f"\nExtracted {len(frames)} frames from video")
+    elif frame_paths is not None:
+        frames = [Image.open(p).convert("RGB") for p in frame_paths[:max_frames]]
+        print(f"\nLoaded {len(frames)} frames from paths")
+    else:
+        # Use test frames (repeat astronaut)
+        from skimage import data
+        astronaut = data.astronaut()
+        img = Image.fromarray(astronaut)
+        frames = [img] * min(4, max_frames)
+        print(f"\nUsing {len(frames)} copies of astronaut test image")
+
+    if len(frames) == 0:
+        raise ValueError("No frames to process")
+
+    print(f"Frame size: {frames[0].size[0]}x{frames[0].size[1]}")
+
+    # Preprocess all frames as batch
+    spatial_stride = int(variant.split("/")[1].split("x")[1])
+    pp_string = f"to_tensor|normalize(minus_one_to_one)|patchify({spatial_stride}, 256)"
+    patch_dict = preprocess_video(frames, pp=pp_string, mode="batch", device=device)
+
+    # Cast to model dtype
+    patch_dict = {
+        k: v.to(dtype) if isinstance(v, torch.Tensor) and v.is_floating_point() else v
+        for k, v in patch_dict.items()
+    }
+
+    print(f"Batch patches shape: {patch_dict['patches'].shape}")
+
+    # Encode and decode
+    print("Running encode/decode on all frames...")
+    with torch.no_grad():
+        encoded = encoder.encode(patch_dict)
+        decoded = decoder.decode(encoded)
+
+    z = encoded["z"]
+    print(f"  Latent shape: {z.shape} (B, N, C)")
+
+    # Postprocess to frames
+    output_frames = postprocess_video(decoded, mode="batch", patch=spatial_stride)
+
+    # Convert frames to bytes
+    frame_bytes_list = []
+    for frame in output_frames:
+        buf = io.BytesIO()
+        frame.save(buf, format="PNG")
+        frame_bytes_list.append(buf.getvalue())
+
+    info = {
+        "model": model_name,
+        "variant": variant,
+        "num_frames": len(frames),
+        "frame_size": (frames[0].size[0], frames[0].size[1]),
+        "latent_shape": list(z.shape),
+        "device": device,
+    }
+
+    print(f"\nProcessed {len(output_frames)} frames")
+    print("Done!")
+
+    return frame_bytes_list, info
+
+
 @app.local_entrypoint()
 def main(
     model: str = "L-64",
     image: str | None = None,
     output: str | None = None,
+    video: str | None = None,
+    max_frames: int = 8,
+    temporal_stride: int = 1,
+    output_dir: str | None = None,
     list_models: bool = False,
 ):
     """Run ViTok inference on Modal.
@@ -181,6 +335,10 @@ def main(
         model: Pretrained model name (default: L-64)
         image: Path to input image (default: astronaut test image)
         output: Path to save output image (default: prints info only)
+        video: Path to video file or directory of frames
+        max_frames: Maximum frames to process for video (default: 8)
+        temporal_stride: Sample every Nth frame (default: 1)
+        output_dir: Directory to save output frames (for video)
         list_models: List available pretrained models and exit
     """
     if list_models:
@@ -200,7 +358,66 @@ def main(
             print(f"  {alias:10s} -> {full_name}")
         return
 
-    # Read input image if provided
+    # Check for mutually exclusive inputs
+    if video is not None and image is not None:
+        print("Error: Cannot specify both --image and --video")
+        return
+
+    # Video inference
+    if video is not None:
+        video_path = Path(video)
+        if not video_path.exists():
+            print(f"Error: Video/directory not found: {video}")
+            return
+
+        print(f"Model: {model}")
+        print(f"Video: {video}")
+        print(f"Max frames: {max_frames}")
+        print(f"Running video inference on Modal...\n")
+
+        # Determine if it's a video file or directory
+        video_bytes = None
+        frame_paths = None
+
+        if video_path.is_file():
+            video_bytes = video_path.read_bytes()
+        elif video_path.is_dir():
+            # Collect frame paths
+            image_extensions = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
+            frame_paths = sorted(
+                str(p) for p in video_path.iterdir()
+                if p.suffix.lower() in image_extensions
+            )
+            if not frame_paths:
+                print(f"Error: No image files found in {video}")
+                return
+            print(f"Found {len(frame_paths)} frames in directory")
+
+        # Run video inference
+        frame_bytes_list, info = run_video_inference.remote(
+            model, video_bytes, frame_paths, max_frames, temporal_stride
+        )
+
+        print(f"\nResults:")
+        print(f"  Model: {info['model']}")
+        print(f"  Variant: {info['variant']}")
+        print(f"  Num frames: {info['num_frames']}")
+        print(f"  Frame size: {info['frame_size'][0]}x{info['frame_size'][1]}")
+        print(f"  Latent shape: {info['latent_shape']}")
+
+        if output_dir is not None:
+            out_dir = Path(output_dir)
+            out_dir.mkdir(parents=True, exist_ok=True)
+            for i, frame_bytes in enumerate(frame_bytes_list):
+                frame_path = out_dir / f"frame_{i:04d}.png"
+                frame_path.write_bytes(frame_bytes)
+            print(f"\nSaved {len(frame_bytes_list)} frames to: {output_dir}")
+        else:
+            print(f"\nTip: Use --output-dir output/ to save the frames")
+
+        return
+
+    # Image inference (original behavior)
     image_bytes = None
     if image is not None:
         image_path = Path(image)

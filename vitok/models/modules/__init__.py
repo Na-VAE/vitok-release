@@ -10,6 +10,7 @@ from vitok.models.modules.rotary_embedding import (
     compute_2d_freqs_cis,
     apply_rotary_emb,
 )
+from vitok.models.modules.rope_3d import compute_3d_freqs_cis
 
 __all__ = [
     "Attention",
@@ -20,5 +21,6 @@ __all__ = [
     "compute_inv_freq",
     "compute_freqs_cis",
     "compute_2d_freqs_cis",
+    "compute_3d_freqs_cis",
     "apply_rotary_emb",
 ]
