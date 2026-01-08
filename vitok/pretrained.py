@@ -6,7 +6,7 @@ from huggingface_hub import hf_hub_download
 # Registry of pretrained models: name -> (repo_id, filename, variant)
 PRETRAINED_MODELS = {
     # Large models (1.1B decoder)
-    "Ld4-Ld24/1x16x64": ("Na-VAE/ViTok-L-64", "model.safetensors", "Ld4-Ld24/1x16x64"),
+    "Ld4-Ld24/1x16x64": ("philippehansen/ViTok-L-16x64", "model.safetensors", "Ld4-Ld24/1x16x64"),
     "Ld4-Ld24/1x32x64": ("Na-VAE/ViTok-L-32", "model.safetensors", "Ld4-Ld24/1x32x64"),
     "Ld4-Ld24/1x16x16": ("Na-VAE/ViTok-L-16", "model.safetensors", "Ld4-Ld24/1x16x16"),
 
