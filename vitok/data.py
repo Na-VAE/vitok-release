@@ -1,8 +1,16 @@
 """Data loading with preprocessing DSL.
 
 Example:
+    # WebDataset (tar shards) - auto-detected
     loader = create_dataloader(
         source="hf://timm/imagenet-22k-wds/imagenet22k-train-{0000..0099}.tar",
+        pp="resize_longest_side(512)|to_tensor|normalize(minus_one_to_one)|patchify(16, 256)",
+        batch_size=32,
+    )
+
+    # Image folder - auto-detected
+    loader = create_dataloader(
+        source="/path/to/images",
         pp="resize_longest_side(512)|to_tensor|normalize(minus_one_to_one)|patchify(16, 256)",
         batch_size=32,
     )
@@ -80,6 +88,50 @@ def to_rgb(img: Image.Image) -> Image.Image:
     return img
 
 
+def _is_image_folder(source: str) -> bool:
+    """Check if source is a folder containing images (not tar files)."""
+    path = Path(source)
+    if not path.is_dir():
+        return False
+    # Check if it has image files but no tar files
+    image_exts = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif"}
+    has_images = any(f.suffix.lower() in image_exts for f in path.iterdir() if f.is_file())
+    has_tars = any(f.suffix.lower() == ".tar" for f in path.iterdir() if f.is_file())
+    return has_images and not has_tars
+
+
+class ImageFolderDataset(torch.utils.data.Dataset):
+    """Simple dataset for a folder of images."""
+
+    def __init__(self, root: str, transform: Callable, seed: int = 0):
+        self.root = Path(root)
+        self.transform = transform
+        image_exts = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif"}
+        self.files = sorted(
+            f for f in self.root.rglob("*")
+            if f.is_file() and f.suffix.lower() in image_exts
+        )
+        # Shuffle with seed
+        rng = random.Random(seed)
+        rng.shuffle(self.files)
+
+        # Split by rank
+        if dist.is_initialized():
+            rank, world = dist.get_rank(), dist.get_world_size()
+            self.files = self.files[rank::world]
+
+    def __len__(self):
+        return len(self.files)
+
+    def __getitem__(self, idx):
+        path = self.files[idx]
+        img = Image.open(path)
+        img = to_rgb(img)
+        patch_dict = self.transform(img)
+        patch_dict["label"] = -1
+        return patch_dict
+
+
 def create_dataloader(
     source: str,
     pp: str,
@@ -88,46 +140,63 @@ def create_dataloader(
     seed: int = 0,
     shuffle_buffer: int = 10000,
     min_size: Optional[int] = None,
-) -> wds.WebLoader:
+):
     """Create a dataloader from source with preprocessing.
+
+    Auto-detects source type:
+        - Image folder: directory containing images (jpg, png, etc.)
+        - WebDataset: tar shards, glob patterns, or hf:// URLs
 
     Args:
         source: Data source:
             - "hf://org/repo/pattern.tar" for HuggingFace Hub
-            - "/path/to/*.tar" for local WebDataset
+            - "/path/to/*.tar" for local WebDataset shards
+            - "/path/to/image_folder" for a folder of images
         pp: Preprocessing string, e.g.:
             "resize_longest_side(512)|to_tensor|normalize(minus_one_to_one)|patchify(16, 256)"
         batch_size: Batch size
         num_workers: DataLoader workers
         seed: Random seed (used for shard assignment, must be same across ranks)
-        shuffle_buffer: Shuffle buffer size
-        min_size: Optional minimum image dimension filter
+        shuffle_buffer: Shuffle buffer size (WebDataset only)
+        min_size: Optional minimum image dimension filter (WebDataset only)
 
     Returns:
-        WebLoader yielding batch dicts with 'label' key (class label, -1 if unavailable)
+        DataLoader yielding batch dicts with 'label' key (class label, -1 if unavailable)
     """
+    # Auto-detect: image folder vs WebDataset
+    if _is_image_folder(source):
+        transform = build_transform(pp)
+        dataset = ImageFolderDataset(source, transform, seed)
+        return torch.utils.data.DataLoader(
+            dataset,
+            batch_size=batch_size,
+            shuffle=False,  # Already shuffled in dataset
+            num_workers=num_workers,
+            collate_fn=patch_collate_fn,
+            pin_memory=True,
+            drop_last=False,
+        )
+
+    # WebDataset path
     transform = build_transform(pp)
     urls = _resolve_source(source, seed)
 
     # Per-rank shuffle seed: different ranks get different sample orderings
-    # Even with same seed, ranks process different shards so samples differ
     rank = dist.get_rank() if dist.is_initialized() else 0
     shuffle_seed = seed + rank
 
     def _transform_sample(s):
         """Transform image and include label in output dict."""
         patch_dict = transform(s["image"])
-        # Get label from cls or cls.txt field, default to -1
         label = s.get("cls") or s.get("cls.txt")
         patch_dict["label"] = _decode_label(label)
         return patch_dict
 
-    # Build pipeline
     dataset = (
         wds.WebDataset(urls, resampled=True, handler=wds.ignore_and_continue)
         .shuffle(shuffle_buffer, seed=shuffle_seed)
         .decode("pil", handler=wds.ignore_and_continue)
-        .rename(image="jpg;jpeg;png;webp", keep=True)  # keep=True preserves other fields like cls
+        .rename(image="jpg;jpeg;png;webp", keep=True)
         .map_dict(image=to_rgb)
     )
 
@@ -160,9 +229,6 @@ def _hf_to_urls(source: str, seed: int = 0) -> list[str]:
     """Convert hf://org/repo/pattern.tar to curl URLs.
 
     Supports brace expansion: hf://org/repo/data-{0000..0099}.tar
-
-    Note: seed should be the SAME across all ranks for consistent shard assignment.
-    The shuffle ensures different epoch orderings when seed changes.
     """
     from huggingface_hub import get_token
 
@@ -170,14 +236,12 @@ def _hf_to_urls(source: str, seed: int = 0) -> list[str]:
     token = get_token()
     auth = f" -H 'Authorization:Bearer {token}'" if token else ""
 
-    # Check for brace expansion {start..end}
     match = re.search(r'\{(\d+)\.\.(\d+)\}', path)
     if match:
         start, end = int(match.group(1)), int(match.group(2))
         width = len(match.group(1))
         prefix, suffix = path[:match.start()], path[match.end():]
 
-        # Extract repo from path (org/repo/subdir/file -> org/repo)
         parts = prefix.split('/')
         repo = '/'.join(parts[:2])
         subpath = '/'.join(parts[2:])
@@ -188,34 +252,23 @@ def _hf_to_urls(source: str, seed: int = 0) -> list[str]:
             rel = f"{subpath}{num}{suffix}"
             urls.append(f"pipe:curl -sL https://huggingface.co/datasets/{repo}/resolve/main/{rel}{auth}")
 
-        # Shuffle with SAME seed across all ranks for consistent assignment
         rng = random.Random(seed)
         rng.shuffle(urls)
 
-        # Split by rank - each rank gets non-overlapping shards
         if dist.is_initialized():
             rank, world = dist.get_rank(), dist.get_world_size()
             urls = urls[rank::world]
 
         return urls
 
-    # No brace expansion - single URL or let WebDataset handle it
     parts = path.split('/')
     repo = '/'.join(parts[:2])
     rel = '/'.join(parts[2:])
     return [f"pipe:curl -sL https://huggingface.co/datasets/{repo}/resolve/main/{rel}{auth}"]
 
 
-def _get_hf_shard_urls(source: str, seed: int = 0) -> list[str]:
-    """Backwards-compatible alias for _hf_to_urls."""
-    return _hf_to_urls(source, seed)
-
-
 def _local_to_urls(source: str, seed: int = 0) -> list[str]:
-    """Resolve local path to list of tar files.
-
-    Note: seed should be the SAME across all ranks for consistent shard assignment.
-    """
+    """Resolve local path to list of tar files."""
     path = Path(source)
 
     if "*" in source or "?" in source:
@@ -225,11 +278,9 @@ def _local_to_urls(source: str, seed: int = 0) -> list[str]:
     else:
         urls = [str(path)]
 
-    # Shuffle with SAME seed across all ranks for consistent assignment
     rng = random.Random(seed)
     rng.shuffle(urls)
 
-    # Split by rank - each rank gets non-overlapping shards
     if dist.is_initialized():
         rank, world = dist.get_rank(), dist.get_world_size()
         urls = urls[rank::world]
@@ -239,6 +290,7 @@ def _local_to_urls(source: str, seed: int = 0) -> list[str]:
 
 __all__ = [
     "create_dataloader",
+    "ImageFolderDataset",
     "patch_collate_fn",
     "to_rgb",
 ]

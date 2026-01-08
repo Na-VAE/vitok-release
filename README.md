@@ -30,7 +30,7 @@ from PIL import Image
 import torch
 
 # Load pretrained AE
-weights_path = download_pretrained("L-16x64")
+weights_path = download_pretrained("L-64")
 model = AE(**decode_variant("Ld4-Ld24/1x16x64"))
 model.load_state_dict(load_file(weights_path))
 model.to(device="cuda", dtype=torch.bfloat16)
@@ -65,12 +65,12 @@ decoder.load_state_dict(load_file(weights_path), strict=False)
 
 | Alias | Full Variant | Description |
 |-------|--------------|-------------|
-| `L-16x64` | `Ld4-Ld24/1x16x64` | Large, stride 16, 64 latent channels |
-| `L-16x32` | `Ld4-Ld24/1x16x32` | Large, stride 16, 32 latent channels |
-| `L-16x16` | `Ld4-Ld24/1x16x16` | Large, stride 16, 16 latent channels |
-| `T-32x64` | `Td4-Td12/1x32x64` | Tiny, stride 32, 64 latent channels |
-| `T-32x128` | `Td4-Td12/1x32x128` | Tiny, stride 32, 128 latent channels |
-| `T-32x256` | `Td4-Td12/1x32x256` | Tiny, stride 32, 256 latent channels |
+| `L-64` | `Ld4-Ld24/1x16x64` | Large, stride 16, 64 latent channels |
+| `L-32` | `Ld4-Ld24/1x32x64` | Large, stride 32, 64 latent channels |
+| `L-16` | `Ld4-Ld24/1x16x16` | Large, stride 16, 16 latent channels |
+| `T-64` | `Td2-Td12/1x16x64` | Tiny, stride 16, 64 latent channels |
+| `T-128` | `Td2-Td12/1x16x128` | Tiny, stride 16, 128 latent channels |
+| `T-256` | `Td2-Td12/1x16x256` | Tiny, stride 16, 256 latent channels |
 
 ### Variant Format
 
@@ -157,7 +157,66 @@ modal run scripts/modal/inference.py --output reconstructed.png
 modal run scripts/modal/inference.py --list-models
 ```
 
-Available models: `L-16x64`, `L-16x32`, `L-16x16`, `T-32x64`, `T-32x128`, `T-32x256`
+Available models: `L-64`, `L-32`, `L-16`, `T-64`, `T-128`, `T-256`
+
+## Evaluation
+
+Evaluate pretrained models on standard benchmarks using reconstruction metrics (FID, SSIM, PSNR).
+
+### Install Evaluation Datasets
+
+```bash
+# Download COCO val2017 (~1GB, 5000 images)
+./scripts/install_eval_datasets.sh
+```
+
+### Local Evaluation
+
+```bash
+# Evaluate a checkpoint on local data
+python scripts/eval_vae.py \
+    --checkpoint path/to/model.safetensors \
+    --variant Ld4-Ld24/1x16x64 \
+    --data ./data/coco/val2017 \
+    --num-samples 5000 \
+    --metrics fid ssim psnr
+
+# With HuggingFace pretrained weights
+python scripts/eval_vae.py \
+    --checkpoint $(python -c "from vitok import download_pretrained; print(download_pretrained('L-64'))") \
+    --variant Ld4-Ld24/1x16x64 \
+    --data ./data/coco/val2017
+```
+
+### Modal Evaluation (Recommended)
+
+Run evaluation on Modal's cloud GPUs without local GPU setup.
+
+```bash
+# Quick test (100 samples)
+modal run scripts/modal/eval_vae.py --model L-64 --num-samples 100
+
+# Full evaluation (1000 samples, default)
+modal run scripts/modal/eval_vae.py --model L-64
+
+# Complete benchmark (5000 samples)
+modal run scripts/modal/eval_vae.py --model L-64 --num-samples 5000
+
+# Evaluate different models
+modal run scripts/modal/eval_vae.py --model L-16
+modal run scripts/modal/eval_vae.py --model L-32
+
+# List available models
+modal run scripts/modal/eval_vae.py --list-models
+```
+
+### Metrics
+
+| Metric | Description | Better |
+|--------|-------------|--------|
+| FID | Fréchet Inception Distance (Inception-V3 features) | Lower |
+| SSIM | Structural Similarity Index | Higher |
+| PSNR | Peak Signal-to-Noise Ratio (dB) | Higher |
 
 ## License
 

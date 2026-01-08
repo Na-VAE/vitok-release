@@ -166,12 +166,19 @@ class MetricCalculator:
         self.ssim_values = []
         self.psnr_values = []
 
-    def move_model_to_device(self, device):
-        """Move feature extraction models to device."""
+    def move_model_to_device(self, device, dtype=None):
+        """Move feature extraction models to device and optionally set dtype.
+
+        Note: FID Inception stays in float32 as it expects float32 inputs.
+        DINO can use bf16 for memory efficiency.
+        """
         if 'fid' in self.metrics:
             self.fid_inception = self.fid_inception.to(device)
+            # Keep FID Inception in float32 - it expects float32 inputs
         if 'fdd' in self.metrics:
             self.dino_model = self.dino_model.to(device)
+            if dtype is not None:
+                self.dino_model = self.dino_model.to(dtype)
 
     @torch.no_grad()
     def update(self, real: List[torch.Tensor], generated: List[torch.Tensor]):
@@ -246,9 +253,10 @@ class MetricCalculator:
 
         # FDD: resize to 512x512, extract DINO features
         if 'fdd' in self.metrics:
-            r512 = [TF.resize(r.to(device=device, dtype=torch.float32), [512, 512],
+            dino_dtype = next(self.dino_model.parameters()).dtype
+            r512 = [TF.resize(r.to(device=device, dtype=dino_dtype), [512, 512],
                              interpolation=InterpolationMode.BICUBIC, antialias=True) for r in reals]
-            g512 = [TF.resize(g.to(device=device, dtype=torch.float32), [512, 512],
+            g512 = [TF.resize(g.to(device=device, dtype=dino_dtype), [512, 512],
                              interpolation=InterpolationMode.BICUBIC, antialias=True) for g in gens]
 
             chunk = 64
