@@ -89,6 +89,12 @@ def setup_distributed(seed: int = 42) -> Tuple[int, int, int, torch.device, Opti
     return rank, world_size, local_rank, device, device_mesh
 
 
+def cleanup_distributed():
+    """Cleanup distributed training environment."""
+    if dist.is_initialized():
+        dist.destroy_process_group()
+
+
 def save_checkpoint(
     train_state: Dict[str, Any],
     checkpoint_root: str,
