@@ -138,7 +138,14 @@ postprocess_images = postprocess
 
 
 def preprocess_video(
-    source: Union[str, Path, List[Image.Image], List[str], List[Path]],
+    source: Union[
+        str,
+        Path,
+        List[Image.Image],
+        List[str],
+        List[Path],
+        List[List[Image.Image]],
+    ],
     pp: str = "to_tensor|normalize(minus_one_to_one)|patchify(16, 256)",
     max_frames: Optional[int] = None,
     temporal_stride: int = 1,
@@ -149,19 +156,26 @@ def preprocess_video(
     max_total_tokens: int = 1024,
     cross_frame_attention: bool = False,
 ) -> Dict[str, torch.Tensor]:
-    """Preprocess video into patch dictionary.
+    """Preprocess video(s) into patch dictionary.
 
-    Extracts frames from video file or image sequence and processes them
+    Extracts frames from video file(s) or image sequence(s) and processes them
     through the naflex pipeline.
 
     Args:
         source: One of:
+            Single video:
             - Video file path (.mp4, .webm, etc.)
             - Directory of images
-            - List of image paths
-            - List of PIL Images
+            - List of image paths (frames of one video)
+            - List of PIL Images (frames of one video)
+
+            Multiple videos (auto-collated):
+            - List of video file paths: ["video1.mp4", "video2.mp4"]
+            - List of directories: ["video1_frames/", "video2_frames/"]
+            - List of List of PIL Images: [[frames1], [frames2]]
+
         pp: Preprocessing pipeline string
-        max_frames: Maximum frames to process (None = all)
+        max_frames: Maximum frames per video (None = all)
         temporal_stride: Sample every Nth frame (currently only stride=1)
         mode: Processing mode:
             - "batch": Each frame is a separate batch item (default)
@@ -173,19 +187,48 @@ def preprocess_video(
 
     Returns:
         Batched patch dictionary with keys:
-            - patches: [B, N, D] where B = num_frames (batch mode)
+            - patches: [B, N, D] where B = total_frames (batch mode)
             - patch_mask: [B, N]
             - row_idx, col_idx: [B, N]
             - time_idx: [B, N] (all zeros in batch mode)
             - attention_mask: [B, N, N]
             - orig_height, orig_width: [B]
+            - video_idx: [B] (if multiple videos, tracks which video each frame belongs to)
+            - frames_per_video: List[int] (if multiple videos)
 
     Example:
+        # Single video
         >>> batch = preprocess_video("video.mp4", max_frames=8)
         >>> batch = preprocess_video(["frame1.png", "frame2.png"])
+
+        # Multiple videos (auto-collated)
+        >>> batch = preprocess_video(["video1.mp4", "video2.mp4"], max_frames=4)
+        >>> batch = preprocess_video([frames_list1, frames_list2])
     """
     from vitok.video import extract_frames
 
+    # Detect if source is multiple videos
+    multiple_videos = _is_multiple_videos(source)
+
+    if multiple_videos:
+        # Process each video separately then collate
+        video_batches = []
+        for video_source in source:
+            single_batch = preprocess_video(
+                video_source,
+                pp=pp,
+                max_frames=max_frames,
+                temporal_stride=temporal_stride,
+                mode=mode,
+                device=device,
+                max_tokens_per_frame=max_tokens_per_frame,
+                max_total_tokens=max_total_tokens,
+                cross_frame_attention=cross_frame_attention,
+            )
+            video_batches.append(single_batch)
+        return video_collate_fn(video_batches)
+
+    # Single video processing
     # Extract frames if not already PIL Images
     if isinstance(source, list) and len(source) > 0 and isinstance(source[0], Image.Image):
         frames = source
@@ -208,6 +251,48 @@ def preprocess_video(
 
     else:
         raise ValueError(f"Unknown mode: {mode}. Use 'batch' or 'sequence'.")
+
+
+def _is_multiple_videos(source) -> bool:
+    """Detect if source represents multiple videos.
+
+    Returns True if source is:
+    - List of video file paths: ["video1.mp4", "video2.mp4"]
+    - List of directories: ["dir1/", "dir2/"]
+    - List of List of PIL Images: [[frames1], [frames2]]
+
+    Returns False if source is:
+    - Single path (str or Path)
+    - List of image paths (frames of one video): ["frame1.png", "frame2.png"]
+    - List of PIL Images (frames of one video): [img1, img2]
+    """
+    if not isinstance(source, list) or len(source) == 0:
+        return False
+
+    first = source[0]
+
+    # List of List of PIL Images -> multiple videos
+    if isinstance(first, list):
+        return True
+
+    # List of PIL Images -> single video's frames
+    if isinstance(first, Image.Image):
+        return False
+
+    # List of paths - check if video files or directories
+    if isinstance(first, (str, Path)):
+        first_path = Path(first)
+        # Video file extensions
+        video_exts = {".mp4", ".webm", ".avi", ".mov", ".mkv", ".flv", ".wmv"}
+        # If first item is a video file or directory, treat as multiple videos
+        if first_path.suffix.lower() in video_exts:
+            return True
+        if first_path.is_dir():
+            return True
+        # Otherwise it's a list of image paths (single video's frames)
+        return False
+
+    return False
 
 
 def postprocess_video(

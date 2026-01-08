@@ -183,6 +183,51 @@ class TestPreprocessVideo:
         with pytest.raises(ValueError):
             preprocess_video(test_frames[:2], mode="invalid", device="cpu")
 
+    def test_preprocess_multiple_videos_list_of_lists(self, test_frames):
+        """Preprocess multiple videos from list of frame lists."""
+        video1_frames = test_frames[:3]
+        video2_frames = test_frames[3:6]
+
+        # Pass as list of lists
+        batch = preprocess_video([video1_frames, video2_frames], device="cpu")
+
+        # Should be auto-collated
+        assert batch["patches"].shape[0] == 6  # 3 + 3 frames
+        assert "video_idx" in batch
+        assert "frames_per_video" in batch
+        assert batch["frames_per_video"] == [3, 3]
+        assert batch["video_idx"][:3].eq(0).all()
+        assert batch["video_idx"][3:].eq(1).all()
+
+    def test_preprocess_multiple_videos_directories(self, tmp_path, test_frames):
+        """Preprocess multiple videos from list of directories."""
+        # Create two directories with frames
+        dir1 = tmp_path / "video1"
+        dir2 = tmp_path / "video2"
+        dir1.mkdir()
+        dir2.mkdir()
+
+        for i, frame in enumerate(test_frames[:2]):
+            frame.save(dir1 / f"frame_{i:04d}.png")
+        for i, frame in enumerate(test_frames[2:4]):
+            frame.save(dir2 / f"frame_{i:04d}.png")
+
+        # Pass list of directories
+        batch = preprocess_video([str(dir1), str(dir2)], device="cpu")
+
+        assert batch["patches"].shape[0] == 4  # 2 + 2 frames
+        assert batch["frames_per_video"] == [2, 2]
+
+    def test_preprocess_multiple_videos_different_frame_counts(self, test_frames):
+        """Preprocess multiple videos with different frame counts."""
+        video1_frames = test_frames[:2]
+        video2_frames = test_frames[2:7]
+
+        batch = preprocess_video([video1_frames, video2_frames], device="cpu")
+
+        assert batch["patches"].shape[0] == 7  # 2 + 5 frames
+        assert batch["frames_per_video"] == [2, 5]
+
 
 # =============================================================================
 # Test Video Postprocessing
