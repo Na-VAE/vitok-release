@@ -31,6 +31,7 @@ import sys
 from pathlib import Path
 
 VOLUME_NAME = "vitok-weights"
+CHECKPOINTS_VOLUME = "vitok-checkpoints"
 
 app = modal.App("vitok-inference")
 
@@ -50,27 +51,36 @@ image = (
     .add_local_dir("vitok", remote_path="/root/vitok-release/vitok")
 )
 
-# Create volume for caching weights
+# Create volumes for caching weights and accessing checkpoints
 vol = modal.Volume.from_name(VOLUME_NAME, create_if_missing=True)
+checkpoints_vol = modal.Volume.from_name(CHECKPOINTS_VOLUME, create_if_missing=True)
 
 
 @app.function(
     image=image,
     gpu="T4",
-    volumes={"/cache": vol},
+    volumes={"/cache": vol, "/checkpoints": checkpoints_vol},
+    secrets=[modal.Secret.from_name("huggingface-secret")],
     timeout=600,
 )
-def run_inference(model_name: str, image_bytes: bytes | None = None) -> tuple[bytes, dict]:
+def run_inference(
+    model_name: str,
+    image_bytes: bytes | None = None,
+    weights_path: str | None = None,
+) -> tuple[bytes, dict]:
     """Run AE encode/decode inference.
 
     Args:
-        model_name: Pretrained model name (e.g., "L-64", "T-128")
+        model_name: Pretrained model name (e.g., "L-64", "T-128") - defines architecture
         image_bytes: Optional input image bytes. If None, uses astronaut test image.
+        weights_path: Optional path to local weights file in /checkpoints volume.
+                     If None, downloads from HuggingFace.
 
     Returns:
         Tuple of (output_image_bytes, info_dict)
     """
     import io
+    import os
     import torch
     import numpy as np
     from PIL import Image
@@ -80,30 +90,35 @@ def run_inference(model_name: str, image_bytes: bytes | None = None) -> tuple[by
     sys.path.insert(0, "/root/vitok-release")
 
     from vitok import AE, decode_variant, preprocess, postprocess
-    from vitok.pretrained import download_pretrained, get_pretrained_info
+    from vitok.pretrained import get_pretrained_info
 
-    # Get model info
+    # Get model info (for variant/architecture)
     repo_id, filename, variant = get_pretrained_info(model_name)
     print(f"Model: {model_name}")
     print(f"  Variant: {variant}")
-    print(f"  HuggingFace: {repo_id}/{filename}")
 
-    # Download weights (cached in volume via HF_HOME)
-    import os
-    os.environ["HF_HOME"] = "/cache/huggingface"
-
-    print("\nDownloading weights (or using cache)...")
-    weights_path = download_pretrained(model_name)
-    print(f"  Weights: {weights_path}")
-
-    # Commit volume changes so weights persist
-    vol.commit()
+    # Get weights - either from local path or HuggingFace
+    if weights_path is not None:
+        # Use local weights from checkpoints volume
+        full_weights_path = f"/checkpoints/{weights_path}"
+        if not os.path.exists(full_weights_path):
+            raise FileNotFoundError(f"Weights not found: {full_weights_path}")
+        print(f"  Weights: {full_weights_path} (local)")
+    else:
+        # Download from HuggingFace
+        from vitok.pretrained import download_pretrained
+        print(f"  HuggingFace: {repo_id}/{filename}")
+        os.environ["HF_HOME"] = "/cache/huggingface"
+        print("\nDownloading weights (or using cache)...")
+        full_weights_path = download_pretrained(model_name)
+        print(f"  Weights: {full_weights_path}")
+        vol.commit()
 
     # Load encoder and decoder separately
     print("\nLoading model...")
     device = "cuda" if torch.cuda.is_available() else "cpu"
     dtype = torch.bfloat16 if device == "cuda" else torch.float32
-    weights = load_file(weights_path)
+    weights = load_file(full_weights_path)
 
     # Create encoder-only model
     encoder = AE(**decode_variant(variant), decoder=False)
@@ -125,7 +140,9 @@ def run_inference(model_name: str, image_bytes: bytes | None = None) -> tuple[by
         from skimage import data
         astronaut = data.astronaut()
         img = Image.fromarray(astronaut)
-        print(f"\nUsing astronaut test image: {img.size[0]}x{img.size[1]}")
+        # Resize to 256x256 to fit max_tokens=256 with patch_size=16
+        img = img.resize((256, 256), Image.LANCZOS)
+        print(f"\nUsing astronaut test image (resized): {img.size[0]}x{img.size[1]}")
 
     # Preprocess
     # Parse spatial stride from variant (e.g., "Ld4-Ld24/1x16x64" -> 16)
@@ -177,26 +194,30 @@ def run_inference(model_name: str, image_bytes: bytes | None = None) -> tuple[by
 @app.function(
     image=image,
     gpu="T4",
-    volumes={"/cache": vol},
+    volumes={"/cache": vol, "/checkpoints": checkpoints_vol},
+    secrets=[modal.Secret.from_name("huggingface-secret")],
     timeout=600,
 )
 def run_video_inference(
     model_name: str,
     video_bytes: bytes | None = None,
-    frame_paths: list[str] | None = None,
+    frame_bytes_list: list[bytes] | None = None,
     max_frames: int = 8,
     temporal_stride: int = 1,
+    weights_path: str | None = None,
 ) -> tuple[list[bytes], dict]:
     """Run AE encode/decode on video frames.
 
     Processes video in batch mode - each frame is encoded/decoded independently.
 
     Args:
-        model_name: Pretrained model name (e.g., "L-64", "T-128")
-        video_bytes: Video file bytes (.mp4, etc.). Mutually exclusive with frame_paths.
-        frame_paths: List of frame image paths. Mutually exclusive with video_bytes.
+        model_name: Pretrained model name (e.g., "L-64", "T-128") - defines architecture
+        video_bytes: Video file bytes (.mp4, etc.). Mutually exclusive with frame_bytes_list.
+        frame_bytes_list: List of frame image bytes. Mutually exclusive with video_bytes.
         max_frames: Maximum number of frames to process
         temporal_stride: Sample every Nth frame (currently only stride=1)
+        weights_path: Optional path to local weights file in /checkpoints volume.
+                     If None, downloads from HuggingFace.
 
     Returns:
         Tuple of (list_of_frame_bytes, info_dict)
@@ -213,26 +234,35 @@ def run_video_inference(
     sys.path.insert(0, "/root/vitok-release")
 
     from vitok import AE, decode_variant, postprocess
-    from vitok.pretrained import download_pretrained, get_pretrained_info
+    from vitok.pretrained import get_pretrained_info
     from vitok.video import extract_frames
     from vitok.pp import preprocess_video, postprocess_video
 
-    # Get model info
+    # Get model info (for variant/architecture)
     repo_id, filename, variant = get_pretrained_info(model_name)
     print(f"Model: {model_name}")
     print(f"  Variant: {variant}")
 
-    # Download weights
-    os.environ["HF_HOME"] = "/cache/huggingface"
-    print("\nDownloading weights (or using cache)...")
-    weights_path = download_pretrained(model_name)
-    vol.commit()
+    # Get weights - either from local path or HuggingFace
+    if weights_path is not None:
+        full_weights_path = f"/checkpoints/{weights_path}"
+        if not os.path.exists(full_weights_path):
+            raise FileNotFoundError(f"Weights not found: {full_weights_path}")
+        print(f"  Weights: {full_weights_path} (local)")
+    else:
+        from vitok.pretrained import download_pretrained
+        print(f"  HuggingFace: {repo_id}/{filename}")
+        os.environ["HF_HOME"] = "/cache/huggingface"
+        print("\nDownloading weights (or using cache)...")
+        full_weights_path = download_pretrained(model_name)
+        print(f"  Weights: {full_weights_path}")
+        vol.commit()
 
     # Load model
     print("\nLoading model...")
     device = "cuda" if torch.cuda.is_available() else "cpu"
     dtype = torch.bfloat16 if device == "cuda" else torch.float32
-    weights = load_file(weights_path)
+    weights = load_file(full_weights_path)
 
     encoder = AE(**decode_variant(variant), decoder=False)
     encoder.to(device=device, dtype=dtype)
@@ -244,7 +274,7 @@ def run_video_inference(
     decoder.load_state_dict(weights, strict=False)
     decoder.eval()
 
-    # Extract frames from video or load from paths
+    # Extract frames from video or load from bytes
     if video_bytes is not None:
         # Save video to temp file and extract frames
         with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as f:
@@ -255,16 +285,18 @@ def run_video_inference(
         finally:
             os.unlink(temp_path)
         print(f"\nExtracted {len(frames)} frames from video")
-    elif frame_paths is not None:
-        frames = [Image.open(p).convert("RGB") for p in frame_paths[:max_frames]]
-        print(f"\nLoaded {len(frames)} frames from paths")
+    elif frame_bytes_list is not None:
+        frames = [Image.open(io.BytesIO(b)).convert("RGB") for b in frame_bytes_list[:max_frames]]
+        print(f"\nLoaded {len(frames)} frames from bytes")
     else:
         # Use test frames (repeat astronaut)
         from skimage import data
         astronaut = data.astronaut()
         img = Image.fromarray(astronaut)
+        # Resize to 256x256 to fit max_tokens=256 with patch_size=16
+        img = img.resize((256, 256), Image.LANCZOS)
         frames = [img] * min(4, max_frames)
-        print(f"\nUsing {len(frames)} copies of astronaut test image")
+        print(f"\nUsing {len(frames)} copies of astronaut test image (resized to 256x256)")
 
     if len(frames) == 0:
         raise ValueError("No frames to process")
@@ -327,20 +359,36 @@ def main(
     max_frames: int = 8,
     temporal_stride: int = 1,
     output_dir: str | None = None,
+    weights: str | None = None,
     list_models: bool = False,
+    list_checkpoints: bool = False,
 ):
     """Run ViTok inference on Modal.
 
     Args:
-        model: Pretrained model name (default: L-64)
+        model: Pretrained model name (default: L-64) - defines architecture
         image: Path to input image (default: astronaut test image)
         output: Path to save output image (default: prints info only)
         video: Path to video file or directory of frames
         max_frames: Maximum frames to process for video (default: 8)
         temporal_stride: Sample every Nth frame (default: 1)
         output_dir: Directory to save output frames (for video)
+        weights: Path to weights in vitok-checkpoints volume (e.g., vae/last/model.safetensors)
         list_models: List available pretrained models and exit
+        list_checkpoints: List available checkpoints in Modal volume and exit
     """
+    if list_checkpoints:
+        import subprocess
+        print("Checkpoints in vitok-checkpoints volume:")
+        result = subprocess.run(
+            ["modal", "volume", "ls", "vitok-checkpoints", "-r"],
+            capture_output=True, text=True
+        )
+        print(result.stdout or "(empty)")
+        if result.stderr:
+            print(result.stderr)
+        return
+
     if list_models:
         # Define models locally to avoid importing torch
         aliases = {
@@ -356,6 +404,8 @@ def main(
         print("Aliases (recommended):")
         for alias, full_name in sorted(aliases.items()):
             print(f"  {alias:10s} -> {full_name}")
+        print()
+        print("Tip: Use --list-checkpoints to see local weights in Modal volume")
         return
 
     # Check for mutually exclusive inputs
@@ -371,31 +421,35 @@ def main(
             return
 
         print(f"Model: {model}")
+        if weights:
+            print(f"Weights: {weights} (local)")
         print(f"Video: {video}")
         print(f"Max frames: {max_frames}")
         print(f"Running video inference on Modal...\n")
 
         # Determine if it's a video file or directory
         video_bytes = None
-        frame_paths = None
+        frame_bytes_list = None
 
         if video_path.is_file():
             video_bytes = video_path.read_bytes()
         elif video_path.is_dir():
-            # Collect frame paths
+            # Collect frame paths and read their bytes
             image_extensions = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
             frame_paths = sorted(
-                str(p) for p in video_path.iterdir()
+                p for p in video_path.iterdir()
                 if p.suffix.lower() in image_extensions
             )
             if not frame_paths:
                 print(f"Error: No image files found in {video}")
                 return
             print(f"Found {len(frame_paths)} frames in directory")
+            # Read frame bytes locally
+            frame_bytes_list = [p.read_bytes() for p in frame_paths[:max_frames]]
 
         # Run video inference
-        frame_bytes_list, info = run_video_inference.remote(
-            model, video_bytes, frame_paths, max_frames, temporal_stride
+        output_frame_bytes, info = run_video_inference.remote(
+            model, video_bytes, frame_bytes_list, max_frames, temporal_stride, weights
         )
 
         print(f"\nResults:")
@@ -408,10 +462,10 @@ def main(
         if output_dir is not None:
             out_dir = Path(output_dir)
             out_dir.mkdir(parents=True, exist_ok=True)
-            for i, frame_bytes in enumerate(frame_bytes_list):
+            for i, frame_bytes in enumerate(output_frame_bytes):
                 frame_path = out_dir / f"frame_{i:04d}.png"
                 frame_path.write_bytes(frame_bytes)
-            print(f"\nSaved {len(frame_bytes_list)} frames to: {output_dir}")
+            print(f"\nSaved {len(output_frame_bytes)} frames to: {output_dir}")
         else:
             print(f"\nTip: Use --output-dir output/ to save the frames")
 
@@ -428,10 +482,12 @@ def main(
         print(f"Input: {image}")
 
     print(f"Model: {model}")
+    if weights:
+        print(f"Weights: {weights} (local)")
     print(f"Running inference on Modal...\n")
 
     # Run inference
-    out_bytes, info = run_inference.remote(model, image_bytes)
+    out_bytes, info = run_inference.remote(model, image_bytes, weights)
 
     print(f"\nResults:")
     print(f"  Model: {info['model']}")
