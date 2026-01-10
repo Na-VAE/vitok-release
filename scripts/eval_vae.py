@@ -256,15 +256,23 @@ def evaluate(
             encoded = encoder.encode(batch)
             output = decoder.decode(encoded)
 
-        ref = postprocess(batch, do_unpack=True, patch=patch_size, output_format="zero_to_one")
-        recon = postprocess(output, do_unpack=True, patch=patch_size, output_format="zero_to_one")
+        # Use [-1, 1] range for metrics (SSIM/PSNR expect data_range=2.0, FID/FDD convert internally)
+        # For square crops, images are uniform size so no unpacking needed
+        do_unpack = crop_style != "adm_square"
+        grid_size = max_size // patch_size
+        ref = postprocess(batch, do_unpack=do_unpack, patch=patch_size, max_grid_size=grid_size, output_format="minus_one_to_one")
+        recon = postprocess(output, do_unpack=do_unpack, patch=patch_size, max_grid_size=grid_size, output_format="minus_one_to_one")
         metric_calc.update(ref, recon)
 
-        # Collect samples for visualization (first N images)
+        # Collect samples for visualization (convert to [0, 1] for saving)
         if save_visuals > 0 and len(visual_originals) < save_visuals:
-            for i in range(min(len(ref), save_visuals - len(visual_originals))):
-                visual_originals.append(ref[i].cpu())
-                visual_recons.append(recon[i].cpu())
+            # Handle both list (from unpack) and tensor (from no unpack) cases
+            ref_list = ref if isinstance(ref, list) else [ref[i] for i in range(ref.shape[0])]
+            recon_list = recon if isinstance(recon, list) else [recon[i] for i in range(recon.shape[0])]
+            for i in range(min(len(ref_list), save_visuals - len(visual_originals))):
+                # Convert from [-1, 1] to [0, 1] for visualization
+                visual_originals.append(((ref_list[i] + 1.0) / 2.0).clamp(0, 1).cpu())
+                visual_recons.append(((recon_list[i] + 1.0) / 2.0).clamp(0, 1).cpu())
 
         samples_seen += len(batch["patches"])
         if verbose and samples_seen % (batch_size * 25) == 0:
@@ -311,11 +319,16 @@ def main():
     group.add_argument("--model", help="Pretrained model name (e.g., L-64)")
     parser.add_argument("--variant", default=None, help="Model variant (required if using --checkpoint)")
     parser.add_argument("--data", required=True, help="Path to evaluation data")
-    parser.add_argument("--max-size", type=int, default=512, help="Max image size")
-    parser.add_argument("--batch-size", type=int, default=16, help="Batch size")
+    parser.add_argument("--max-size", type=int, default=256, help="Max image size")
+    parser.add_argument("--batch-size", type=int, default=64, help="Batch size per GPU")
     parser.add_argument("--num-samples", type=int, default=5000, help="Number of samples")
+    parser.add_argument("--crop-style", default="native", choices=["native", "adm_square"], help="Crop style")
+    parser.add_argument("--swa-window", type=int, default=None, help="Sliding window attention radius")
     parser.add_argument("--metrics", nargs="+", default=["fid", "fdd", "ssim", "psnr"], help="Metrics to compute")
     parser.add_argument("--no-compile", action="store_true", help="Disable torch.compile")
+    parser.add_argument("--save-visuals", type=int, default=0, help="Number of sample images to save")
+    parser.add_argument("--output-dir", default=None, help="Directory to save visuals")
+    parser.add_argument("--output-json", default=None, help="Save results to JSON file")
     args = parser.parse_args()
 
     # Setup distributed (for multi-GPU)
@@ -328,13 +341,24 @@ def main():
             variant=args.variant,
             data=args.data,
             max_size=args.max_size,
-            batch_size=args.batch_size // world_size,
+            batch_size=args.batch_size,  # Per-GPU batch size, not divided
             num_samples=args.num_samples,
+            crop_style=args.crop_style,
+            swa_window=args.swa_window,
             metrics=tuple(args.metrics),
             compile=not args.no_compile,
             device=device,
             verbose=(rank == 0),
+            save_visuals=args.save_visuals if rank == 0 else 0,
+            output_dir=args.output_dir,
         )
+
+        # Save results to JSON (only rank 0)
+        if rank == 0 and args.output_json:
+            import json
+            with open(args.output_json, "w") as f:
+                json.dump(stats, f, indent=2)
+            print(f"\nResults saved to: {args.output_json}")
     finally:
         cleanup_distributed()
 
