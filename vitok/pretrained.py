@@ -7,23 +7,25 @@ from huggingface_hub import hf_hub_download
 PRETRAINED_MODELS = {
     # Large models (1.1B decoder)
     "Ld4-Ld24/1x16x64": ("philippehansen/ViTok-L-16x64", "model.safetensors", "Ld4-Ld24/1x16x64"),
-    "Ld4-Ld24/1x32x64": ("Na-VAE/ViTok-L-32", "model.safetensors", "Ld4-Ld24/1x32x64"),
-    "Ld4-Ld24/1x16x16": ("Na-VAE/ViTok-L-16", "model.safetensors", "Ld4-Ld24/1x16x16"),
+    "Ld4-Ld24/1x16x32": ("philippehansen/ViTok-L-16x32", "model.safetensors", "Ld4-Ld24/1x16x32"),
 
     # Tiny models (for testing)
     "Td2-Td12/1x16x64": ("Na-VAE/ViTok-T-64", "model.safetensors", "Td2-Td12/1x16x64"),
     "Td2-Td12/1x16x128": ("Na-VAE/ViTok-T-128", "model.safetensors", "Td2-Td12/1x16x128"),
     "Td2-Td12/1x16x256": ("Na-VAE/ViTok-T-256", "model.safetensors", "Td2-Td12/1x16x256"),
+    "Td2-Td12/1x32x64": ("philippehansen/ViTok-T-32x64", "model.safetensors", "Td2-Td12/1x32x64"),
 }
 
 # Short aliases for convenience
 PRETRAINED_ALIASES = {
     "L-64": "Ld4-Ld24/1x16x64",
-    "L-32": "Ld4-Ld24/1x32x64",
-    "L-16": "Ld4-Ld24/1x16x16",
+    "L-16x64": "Ld4-Ld24/1x16x64",
+    "L-32": "Ld4-Ld24/1x16x32",
+    "L-16x32": "Ld4-Ld24/1x16x32",
     "T-64": "Td2-Td12/1x16x64",
     "T-128": "Td2-Td12/1x16x128",
     "T-256": "Td2-Td12/1x16x256",
+    "T-32x64": "Td2-Td12/1x32x64",
 }
 
 

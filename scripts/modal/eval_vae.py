@@ -2,37 +2,48 @@
 
 This is a thin wrapper around scripts/eval_vae.py that:
 1. Sets up the Modal environment with GPU and dependencies
-2. Downloads COCO val2017 if needed
+2. Uses cached datasets from vitok-data volume (or downloads if needed)
 3. Calls the same evaluate() function used locally
 
 Usage:
     # Evaluate L-64 on COCO val2017 (default)
-    modal run scripts/modal/eval_vae.py
+    modal run scripts/modal/eval_vae.py --model L-64
 
-    # Evaluate specific model
-    modal run scripts/modal/eval_vae.py --model L-16
+    # With crop style and resolution
+    modal run scripts/modal/eval_vae.py --model L-64 --crop-style adm_square --max-size 256
+
+    # Native resolution with SWA for high-res
+    modal run scripts/modal/eval_vae.py --model L-64 --crop-style native --max-size 1024 --swa-window 8
+
+    # Use cached DIV8K for high-res eval
+    modal run scripts/modal/eval_vae.py --model L-64 --dataset div8k --max-size 1024
 
     # Quick test with fewer samples
     modal run scripts/modal/eval_vae.py --model L-64 --num-samples 100
 
-    # Full evaluation
-    modal run scripts/modal/eval_vae.py --model L-64 --num-samples 5000
+    # Save results to JSON
+    modal run scripts/modal/eval_vae.py --model L-64 --output-json results.json
 
     # List available models
     modal run scripts/modal/eval_vae.py --list-models
+
+Setup:
+    # Pre-download datasets to avoid re-downloading each run
+    modal run scripts/modal/setup_data.py
 """
 
 import modal
 import sys
 
-VOLUME_NAME = "vitok-weights"
+WEIGHTS_VOLUME = "vitok-weights"
+DATA_VOLUME = "vitok-data"
 
 app = modal.App("vitok-eval")
 
 # Evaluation image with all required packages
 image = (
     modal.Image.debian_slim(python_version="3.11")
-    .apt_install("wget", "unzip")
+    .apt_install("wget", "unzip", "curl")
     .pip_install(
         "torch>=2.4.0",
         "torchvision>=0.19.0",
@@ -45,13 +56,22 @@ image = (
         "pytorch-fid>=0.3.0",
         "dino-perceptual>=0.1.0",
         "torchmetrics>=1.0.0",
+        "einops",
     )
     .add_local_dir("vitok", remote_path="/root/vitok-release/vitok")
     .add_local_file("scripts/eval_vae.py", remote_path="/root/vitok-release/scripts/eval_vae.py")
 )
 
-# Volume for caching weights and datasets
-vol = modal.Volume.from_name(VOLUME_NAME, create_if_missing=True)
+# Volumes for caching
+weights_vol = modal.Volume.from_name(WEIGHTS_VOLUME, create_if_missing=True)
+data_vol = modal.Volume.from_name(DATA_VOLUME, create_if_missing=True)
+
+# Dataset presets mapping to paths on volumes
+DATASET_PRESETS = {
+    "coco-val": "/data/coco/val2017",
+    "imagenet-val": "/data/imagenet/val",
+    "div8k": "/data/div8k/val",
+}
 
 
 def download_coco_val(cache_dir: str) -> str:
@@ -65,6 +85,7 @@ def download_coco_val(cache_dir: str) -> str:
         return str(coco_dir)
 
     print("Downloading COCO val2017...")
+    print("TIP: Run 'modal run scripts/modal/setup_data.py' to pre-cache datasets")
     coco_dir.parent.mkdir(parents=True, exist_ok=True)
 
     zip_path = coco_dir.parent / "val2017.zip"
@@ -79,8 +100,8 @@ def download_coco_val(cache_dir: str) -> str:
 
 @app.function(
     image=image,
-    gpu="A100",
-    volumes={"/cache": vol},
+    gpu="A100-80GB",
+    volumes={"/cache": weights_vol, "/data": data_vol},
     secrets=[modal.Secret.from_name("huggingface-secret")],
     timeout=3600,
 )
@@ -89,7 +110,11 @@ def run_eval(
     num_samples: int = 5000,
     max_size: int = 512,
     batch_size: int = 16,
+    crop_style: str = "native",
+    swa_window: int | None = None,
     data_path: str | None = None,
+    dataset: str | None = None,
+    save_visuals: int = 0,
 ) -> dict:
     """Run VAE evaluation using the shared evaluate() function.
 
@@ -98,12 +123,18 @@ def run_eval(
         num_samples: Number of samples to evaluate
         max_size: Maximum image size
         batch_size: Batch size for evaluation
-        data_path: Optional custom data path (default: COCO val2017)
+        crop_style: Crop style (adm_square, native)
+        swa_window: Sliding window attention radius (None=full attention)
+        data_path: Optional custom data path
+        dataset: Dataset preset (coco-val, div8k, imagenet-val)
+        save_visuals: Number of sample images to save (0=none)
 
     Returns:
-        Dictionary with evaluation metrics
+        Dictionary with evaluation metrics (includes 'visuals' key with base64 encoded images if save_visuals > 0)
     """
     import os
+    import base64
+    from pathlib import Path
 
     # Add vitok to path
     sys.path.insert(0, "/root/vitok-release")
@@ -114,22 +145,68 @@ def run_eval(
     # Set HF cache
     os.environ["HF_HOME"] = "/cache/huggingface"
 
-    # Download COCO if no custom data path
-    if data_path is None:
-        data_path = download_coco_val("/cache/datasets")
-        vol.commit()
+    # Resolve data path
+    if data_path:
+        resolved_data = data_path
+    elif dataset:
+        if dataset in DATASET_PRESETS:
+            resolved_data = DATASET_PRESETS[dataset]
+            # Check if local dataset exists
+            if resolved_data.startswith("/data"):
+                if not Path(resolved_data).exists():
+                    if dataset == "coco-val":
+                        print(f"Dataset not cached at {resolved_data}, downloading...")
+                        resolved_data = download_coco_val("/data")
+                        data_vol.commit()
+                    elif dataset == "imagenet-val":
+                        raise FileNotFoundError(
+                            f"ImageNet-1k val not cached at {resolved_data}. "
+                            f"Run 'modal run scripts/modal/setup_data.py --dataset imagenet' first. "
+                            f"Note: Requires HF token with accepted license for ILSVRC/imagenet-1k."
+                        )
+                    else:
+                        raise FileNotFoundError(
+                            f"Dataset {dataset} not found at {resolved_data}. "
+                            f"Run 'modal run scripts/modal/setup_data.py --dataset {dataset.split('-')[0]}' first."
+                        )
+        else:
+            raise ValueError(f"Unknown dataset preset: {dataset}. Available: {list(DATASET_PRESETS.keys())}")
+    else:
+        # Default to COCO
+        resolved_data = DATASET_PRESETS["coco-val"]
+        if not Path(resolved_data).exists():
+            resolved_data = download_coco_val("/data")
+            data_vol.commit()
+
+    print(f"Using data: {resolved_data}")
+
+    # Setup output directory for visuals
+    output_dir = Path("/tmp/eval_output") if save_visuals > 0 else None
 
     # Run evaluation using shared function
     stats = evaluate(
         model_name=model_name,
-        data=data_path,
+        data=resolved_data,
         max_size=max_size,
         batch_size=batch_size,
         num_samples=num_samples,
+        crop_style=crop_style,
+        swa_window=swa_window,
         metrics=("fid", "fdd", "ssim", "psnr"),
         compile=True,
         verbose=True,
+        save_visuals=save_visuals,
+        output_dir=output_dir,
     )
+
+    # Read and encode visuals if saved
+    if save_visuals > 0 and output_dir and output_dir.exists():
+        visuals = {}
+        grid_path = output_dir / "comparison_grid.jpg"
+        if grid_path.exists():
+            with open(grid_path, "rb") as f:
+                visuals["comparison_grid"] = base64.b64encode(f.read()).decode()
+        stats["visuals"] = visuals
 
     return stats
 
@@ -140,8 +217,15 @@ def main(
     num_samples: int = 5000,
     max_size: int = 512,
     batch_size: int = 16,
+    crop_style: str = "native",
+    swa_window: int | None = None,
     data: str | None = None,
+    dataset: str | None = None,
+    output_json: str | None = None,
+    output_dir: str | None = None,
+    save_visuals: int = 8,
     list_models: bool = False,
+    list_datasets: bool = False,
 ):
     """Run ViTok VAE evaluation on Modal.
 
@@ -150,17 +234,26 @@ def main(
         num_samples: Number of samples to evaluate (default: 5000)
         max_size: Maximum image size (default: 512)
         batch_size: Batch size (default: 16)
+        crop_style: Crop style - adm_square or native (default: native)
+        swa_window: Sliding window attention radius (default: None)
         data: Custom data path (default: COCO val2017)
+        dataset: Dataset preset (coco-val, div8k, imagenet-val)
+        output_json: Save results to JSON file
+        output_dir: Directory to save visuals (default: results/<model>_<dataset>_<size>)
+        save_visuals: Number of sample images to save (default: 8, 0=none)
         list_models: List available pretrained models and exit
+        list_datasets: List available dataset presets and exit
     """
+    import json
+    import base64
+    from pathlib import Path
+
     if list_models:
         aliases = {
-            "L-64": "Ld4-Ld24/1x16x64",
-            "L-32": "Ld4-Ld24/1x32x64",
-            "L-16": "Ld4-Ld24/1x16x16",
-            "T-64": "Td2-Td12/1x16x64",
-            "T-128": "Td2-Td12/1x16x128",
-            "T-256": "Td2-Td12/1x16x256",
+            "L-64": "Ld4-Ld24/1x16x64 (philippehansen/ViTok-L-16x64)",
+            "L-32": "Ld4-Ld24/1x32x64 (Na-VAE/ViTok-L-32)",
+            "L-16": "Ld4-Ld24/1x16x16 (Na-VAE/ViTok-L-16)",
+            "T-32x64": "Td2-Td12/1x32x64 (philippehansen/ViTok-T-32x64)",
         }
         print("Available pretrained models:")
         print()
@@ -168,25 +261,86 @@ def main(
             print(f"  {alias:10s} -> {full_name}")
         return
 
+    if list_datasets:
+        print("Available dataset presets:")
+        print()
+        print("  coco-val     COCO val2017 (5K images, general eval)")
+        print("  imagenet-val ImageNet-1k val (50K images, requires HF auth)")
+        print("  div8k        DIV8K validation (high-res, 1024p+)")
+        print()
+        print("Setup:")
+        print("  modal run scripts/modal/setup_data.py                    # COCO only")
+        print("  modal run scripts/modal/setup_data.py --dataset imagenet # ImageNet")
+        print("  modal run scripts/modal/setup_data.py --dataset div8k    # DIV8K")
+        return
+
     print(f"Model: {model}")
     print(f"Samples: {num_samples}")
     print(f"Max size: {max_size}")
     print(f"Batch size: {batch_size}")
-    if data:
+    print(f"Crop style: {crop_style}")
+    print(f"SWA window: {swa_window}")
+    print(f"Save visuals: {save_visuals}")
+    if dataset:
+        print(f"Dataset: {dataset}")
+    elif data:
         print(f"Data: {data}")
     else:
-        print("Data: COCO val2017 (will download if needed)")
+        print("Data: COCO val2017 (from vitok-data volume)")
     print(f"\nRunning evaluation on Modal...\n")
 
-    stats = run_eval.remote(model, num_samples, max_size, batch_size, data)
+    stats = run_eval.remote(
+        model_name=model,
+        num_samples=num_samples,
+        max_size=max_size,
+        batch_size=batch_size,
+        crop_style=crop_style,
+        swa_window=swa_window,
+        data_path=data,
+        dataset=dataset,
+        save_visuals=save_visuals,
+    )
 
     print(f"\n{'='*50}")
     print(f"Evaluation Results: {stats.get('model', model)}")
     print(f"{'='*50}")
     print(f"Variant: {stats.get('variant', 'N/A')}")
     print(f"Samples: {stats.get('samples', 'N/A')}")
+    print(f"Crop style: {stats.get('crop_style', 'N/A')}")
+    print(f"SWA window: {stats.get('swa_window', 'N/A')}")
+    if "throughput_img_per_sec" in stats:
+        print(f"Throughput: {stats['throughput_img_per_sec']:.1f} img/s")
     print()
+    if "total_gflops" in stats:
+        print("FLOPs:")
+        print(f"  Total: {stats['total_gflops']:.2f} GFLOPs")
+        print()
     print("Metrics:")
     for k in ["fid", "fdd", "ssim", "psnr"]:
         if k in stats:
             print(f"  {k.upper():6s}: {stats[k]:.4f}")
+
+    # Save visuals locally
+    if "visuals" in stats and stats["visuals"]:
+        # Determine output directory
+        if output_dir:
+            vis_dir = Path(output_dir)
+        else:
+            ds_name = dataset or "coco-val"
+            vis_dir = Path(f"results/{model}_{ds_name}_{max_size}p_{crop_style}")
+        vis_dir.mkdir(parents=True, exist_ok=True)
+
+        # Save comparison grid
+        if "comparison_grid" in stats["visuals"]:
+            grid_path = vis_dir / "comparison_grid.jpg"
+            with open(grid_path, "wb") as f:
+                f.write(base64.b64decode(stats["visuals"]["comparison_grid"]))
+            print(f"\nSaved comparison grid to: {grid_path}")
+
+        # Remove visuals from stats before saving JSON
+        del stats["visuals"]
+
+    if output_json:
+        with open(output_json, "w") as f:
+            json.dump(stats, f, indent=2)
+        print(f"\nResults saved to: {output_json}")

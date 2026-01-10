@@ -2,9 +2,11 @@
 
 **ViTok-v2** (Vision Transformer Tokenizer v2) is a ViT-based image tokenizer designed for generative models. It features native aspect-ratio support via NaFlex patchification, enabling deployment at arbitrary resolutions while maintaining the scaling advantages of Vision Transformer architectures.
 
-> **Note**: This is an independent public reimplementation by Philippe Hansen-Estruch and is not affiliated with Meta. The original research was conducted at Meta using a separate internal codebase.
+[![Try Demo](https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-Demo-blue)](https://huggingface.co/spaces/philippehansen/navae)
+[![Paper](https://img.shields.io/badge/arXiv-2501.09755-b31b1b)](https://arxiv.org/abs/2501.09755)
+[![Models](https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-Models-yellow)](https://huggingface.co/Na-VAE)
 
-> **Coming Soon**: ArXiv paper and pretrained model weights.
+> **Note**: This is an independent public reimplementation by Philippe Hansen-Estruch and is not affiliated with Meta. The original research was conducted at Meta using a separate internal codebase.
 
 ## Key Features
 
@@ -12,6 +14,27 @@
 - **Asymmetric Encoder-Decoder**: Shallow encoders paired with deep decoders for optimal reconstruction
 - **2D RoPE**: Rotary position embeddings for spatial awareness at any resolution
 - **Streaming Data**: WebDataset and HuggingFace Hub support for large-scale training
+
+## Interactive Demo
+
+Try ViTok reconstruction on your own images:
+
+**[Launch Demo on HuggingFace Spaces](https://huggingface.co/spaces/philippehansen/navae)**
+
+The demo shows:
+- **Original** vs **Reconstruction** side-by-side
+- **Difference heatmap** (blue=low error, red=high error)
+- **SSIM/PSNR metrics** for quality assessment
+
+<!-- Uncomment when comparison images are generated:
+## Visual Results
+
+<p align="center">
+  <img src="assets/comparisons/astronaut_comparison.png" alt="Reconstruction Comparison" width="800"/>
+</p>
+
+*Comparison of ViTok-L-64 against SD-VAE and FLUX VAE on standard test images.*
+-->
 
 ## Installation
 
