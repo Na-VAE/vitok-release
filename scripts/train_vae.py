@@ -38,7 +38,7 @@ from vitok.data import create_dataloader
 from vitok.pp.io import postprocess
 from vitok.pp import sample_tiles
 from vitok import utils as tu
-from vitok.evaluators import MetricCalculator
+from vitok.metrics import MetricCalculator
 
 # Perceptual losses
 from dino_perceptual import DINOPerceptual

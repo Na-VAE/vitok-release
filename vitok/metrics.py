@@ -248,8 +248,8 @@ class MetricCalculator:
                 if fake_feat.dim() == 4:
                     fake_feat = torch.flatten(fake_feat, 1)
 
-                self.inception_real.append(real_feat)
-                self.inception_fake.append(fake_feat)
+                self.inception_real.append(real_feat.cpu())
+                self.inception_fake.append(fake_feat.cpu())
 
         # FDD: resize to 512x512, extract DINO features
         if 'fdd' in self.metrics:
@@ -267,8 +267,8 @@ class MetricCalculator:
                 real_d, _ = self.dino_model(rb)
                 fake_d, _ = self.dino_model(gb)
 
-                self.dino_real.append(real_d)
-                self.dino_fake.append(fake_d)
+                self.dino_real.append(real_d.cpu())
+                self.dino_fake.append(fake_d.cpu())
 
     def gather(self) -> dict:
         """Gather and compute final metrics across all processes.
