@@ -285,6 +285,7 @@ def run_eval_multi_gpu(
     results_file = output_dir / "results.json"
 
     # Build torchrun command
+    # Note: eval_vae.py automatically disables compile when distributed is detected
     cmd = [
         "torchrun",
         f"--nproc_per_node={n_gpus}",
@@ -297,7 +298,6 @@ def run_eval_multi_gpu(
         "--num-samples", str(num_samples),
         "--crop-style", crop_style,
         "--output-json", str(results_file),
-        "--no-compile",  # Disable compile for multi-GPU (avoids distributed compilation issues)
     ]
     if swa_window is not None:
         cmd.extend(["--swa-window", str(swa_window)])
