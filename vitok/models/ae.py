@@ -17,13 +17,33 @@ Float8Mode = Literal["training", "inference"]
 
 
 def _apply_float8(module: nn.Module, mode: Float8Mode) -> None:
-    """Apply float8 conversion to a module."""
+    """Apply quantization to a module for float8 training or inference.
+
+    For inference mode:
+    - Uses FP8 on H100+ (compute capability 9.0+)
+    - Falls back to INT8 on A100 and older GPUs (compute capability < 9.0)
+
+    INT8 is required for A100 because TorchAO's Float8DynamicActivationFloat8WeightConfig
+    requires compute capability 8.9+ (H100/Ada Lovelace or newer).
+    """
     if mode == "training":
         from torchao.float8 import convert_to_float8_training
         convert_to_float8_training(module)
     else:
-        from torchao.quantization import quantize_, Float8DynamicActivationFloat8WeightConfig
-        quantize_(module, Float8DynamicActivationFloat8WeightConfig())
+        # Check GPU compute capability for inference quantization
+        if torch.cuda.is_available():
+            cc = torch.cuda.get_device_capability()
+            if cc[0] >= 9:
+                # H100 or newer - use FP8
+                from torchao.quantization import quantize_, Float8DynamicActivationFloat8WeightConfig
+                quantize_(module, Float8DynamicActivationFloat8WeightConfig())
+            else:
+                # A100 or older - use INT8 (FP8 not supported)
+                from torchao.quantization import quantize_, Int8DynamicActivationInt8WeightConfig
+                quantize_(module, Int8DynamicActivationInt8WeightConfig())
+        else:
+            # CPU fallback - skip quantization
+            pass
 
 def _make_score_mod(attn_mask: torch.Tensor, num_special: int = 0):
     """Create score_mod from attention mask, handling special tokens inline."""
