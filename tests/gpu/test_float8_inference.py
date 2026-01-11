@@ -36,6 +36,7 @@ image = (
         "einops",
         "torchao>=0.5.0",
         "torchmetrics>=1.0.0",
+        "webdataset",
     )
     .add_local_dir("vitok", remote_path="/root/vitok-release/vitok")
 )
@@ -77,7 +78,7 @@ def test_float8_inference(
     os.environ["HF_HOME"] = "/cache/huggingface"
 
     from vitok import AE, decode_variant
-    from vitok.pretrained import download_pretrained
+    from vitok.pretrained import download_pretrained, get_pretrained_info
 
     device = torch.device("cuda")
     dtype = torch.bfloat16
@@ -94,7 +95,8 @@ def test_float8_inference(
     print()
 
     # Download model
-    checkpoint, variant = download_pretrained(model_name)
+    _, _, variant = get_pretrained_info(model_name)
+    checkpoint = download_pretrained(model_name)
     print(f"  Checkpoint: {checkpoint}")
     print(f"  Variant: {variant}")
 
@@ -156,7 +158,7 @@ def test_float8_inference(
             torch.cuda.synchronize()
             bf16_times.append((time.perf_counter() - start) * 1000)
 
-            bf16_outputs.append(decoded["recon_patches"].clone())
+            bf16_outputs.append(decoded["patches"].clone())
 
     bf16_outputs = torch.cat(bf16_outputs, dim=0)
     bf16_has_nan = torch.isnan(bf16_outputs).any().item() or torch.isinf(bf16_outputs).any().item()
@@ -168,17 +170,28 @@ def test_float8_inference(
     del encoder_bf16, decoder_bf16
     torch.cuda.empty_cache()
 
-    # Test 2: Float8 inference mode
-    print("\n[2/3] Testing Float8 inference mode...")
+    # Test 2: INT8 inference mode (applied AFTER loading weights)
+    print("\n[2/3] Testing INT8 inference mode...")
 
     try:
-        encoder_f8 = AE(**config, decoder=False, float8_mode="inference").to(device, dtype)
+        from torchao.quantization import quantize_, Int8DynamicActivationInt8WeightConfig
+
+        # Create model WITHOUT quantization, load weights, THEN quantize
+        encoder_f8 = AE(**config, decoder=False, float8_mode=None).to(device, dtype)
         encoder_f8.load_state_dict(weights, strict=False)
         encoder_f8.eval()
 
-        decoder_f8 = AE(**config, encoder=False, float8_mode="inference").to(device, dtype)
+        # Apply INT8 quantization AFTER loading weights
+        for block in encoder_f8.encoder_blocks:
+            quantize_(block, Int8DynamicActivationInt8WeightConfig())
+
+        decoder_f8 = AE(**config, encoder=False, float8_mode=None).to(device, dtype)
         decoder_f8.load_state_dict(weights, strict=False)
         decoder_f8.eval()
+
+        # Apply INT8 quantization AFTER loading weights
+        for block in decoder_f8.decoder_blocks:
+            quantize_(block, Int8DynamicActivationInt8WeightConfig())
 
         f8_outputs = []
         f8_times = []
@@ -206,7 +219,7 @@ def test_float8_inference(
                 torch.cuda.synchronize()
                 f8_times.append((time.perf_counter() - start) * 1000)
 
-                f8_outputs.append(decoded["recon_patches"].clone())
+                f8_outputs.append(decoded["patches"].clone())
 
         f8_outputs = torch.cat(f8_outputs, dim=0)
         float8_has_nan = torch.isnan(f8_outputs).any().item() or torch.isinf(f8_outputs).any().item()
