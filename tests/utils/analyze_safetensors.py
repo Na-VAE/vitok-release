@@ -117,5 +117,12 @@ def extract_and_analyze(tar_path: str = "/data/gdrive_file", extract_dir: str = 
 
 
 @app.local_entrypoint()
-def main():
-    extract_and_analyze.remote()
+def main(tar_file: str = "transfer_for_eval.tar.gz"):
+    """Extract and analyze safetensors from tar file.
+
+    Args:
+        tar_file: Name of tar file in vitok-downloads volume
+    """
+    tar_path = f"/data/{tar_file}"
+    print(f"Extracting: {tar_path}")
+    extract_and_analyze.remote(tar_path=tar_path)
