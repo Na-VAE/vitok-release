@@ -140,6 +140,7 @@ def create_dataloader(
     seed: int = 0,
     shuffle_buffer: int = 10000,
     min_size: Optional[int] = None,
+    drop_last: bool = False,
 ):
     """Create a dataloader from source with preprocessing.
 
@@ -159,6 +160,7 @@ def create_dataloader(
         seed: Random seed (used for shard assignment, must be same across ranks)
         shuffle_buffer: Shuffle buffer size (WebDataset only)
         min_size: Optional minimum image dimension filter (WebDataset only)
+        drop_last: Drop last incomplete batch (useful for multi-GPU to ensure consistent batch sizes)
 
     Returns:
         DataLoader yielding batch dicts with 'label' key (class label, -1 if unavailable)
@@ -174,7 +176,7 @@ def create_dataloader(
             num_workers=num_workers,
             collate_fn=patch_collate_fn,
             pin_memory=True,
-            drop_last=False,
+            drop_last=drop_last,
         )
 
     # WebDataset path

@@ -21,6 +21,9 @@ Usage:
     # Quick test with fewer samples
     modal run scripts/modal/eval_vae.py --model L-64 --num-samples 100
 
+    # Multi-GPU for large datasets (e.g., ImageNet 50K)
+    modal run scripts/modal/eval_vae.py --model L-64 --dataset imagenet-val --n-gpus 8
+
     # Save results to JSON
     modal run scripts/modal/eval_vae.py --model L-64 --output-json results.json
 
@@ -108,8 +111,8 @@ def download_coco_val(cache_dir: str) -> str:
 def run_eval(
     model_name: str = "L-64",
     num_samples: int = 5000,
-    max_size: int = 512,
-    batch_size: int = 16,
+    max_size: int = 256,
+    batch_size: int = 64,
     crop_style: str = "native",
     swa_window: int | None = None,
     data_path: str | None = None,
@@ -211,12 +214,131 @@ def run_eval(
     return stats
 
 
+@app.function(
+    image=image,
+    gpu="A100:8",
+    volumes={"/cache": weights_vol, "/data": data_vol},
+    secrets=[modal.Secret.from_name("huggingface-secret")],
+    timeout=7200,
+)
+def run_eval_multi_gpu(
+    model_name: str = "L-64",
+    num_samples: int = 50000,
+    max_size: int = 256,
+    batch_size: int = 64,
+    crop_style: str = "native",
+    swa_window: int | None = None,
+    data_path: str | None = None,
+    dataset: str | None = None,
+    save_visuals: int = 0,
+    n_gpus: int = 8,
+) -> dict:
+    """Run multi-GPU VAE evaluation using torchrun.
+
+    Uses distributed data parallel to split evaluation across multiple GPUs.
+    """
+    import os
+    import subprocess
+    import json
+    import base64
+    from pathlib import Path
+
+    # Set environment
+    os.environ["HF_HOME"] = "/cache/huggingface"
+
+    # Resolve data path
+    if data_path:
+        resolved_data = data_path
+    elif dataset:
+        if dataset in DATASET_PRESETS:
+            resolved_data = DATASET_PRESETS[dataset]
+            if resolved_data.startswith("/data"):
+                if not Path(resolved_data).exists():
+                    if dataset == "coco-val":
+                        print(f"Dataset not cached at {resolved_data}, downloading...")
+                        resolved_data = download_coco_val("/data")
+                        data_vol.commit()
+                    elif dataset == "imagenet-val":
+                        raise FileNotFoundError(
+                            f"ImageNet-1k val not cached at {resolved_data}. "
+                            f"Run 'modal run scripts/modal/setup_data.py --dataset imagenet' first."
+                        )
+                    else:
+                        raise FileNotFoundError(
+                            f"Dataset {dataset} not found at {resolved_data}. "
+                            f"Run 'modal run scripts/modal/setup_data.py --dataset {dataset.split('-')[0]}' first."
+                        )
+        else:
+            raise ValueError(f"Unknown dataset preset: {dataset}")
+    else:
+        resolved_data = DATASET_PRESETS["coco-val"]
+        if not Path(resolved_data).exists():
+            resolved_data = download_coco_val("/data")
+            data_vol.commit()
+
+    print(f"Using data: {resolved_data}")
+    print(f"Running with {n_gpus} GPUs")
+
+    # Setup output directory
+    output_dir = Path("/tmp/eval_output")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    results_file = output_dir / "results.json"
+
+    # Build torchrun command
+    # Note: eval_vae.py automatically disables compile when distributed is detected
+    cmd = [
+        "torchrun",
+        f"--nproc_per_node={n_gpus}",
+        "--master_port=29500",
+        "/root/vitok-release/scripts/eval_vae.py",
+        "--model", model_name,
+        "--data", resolved_data,
+        "--max-size", str(max_size),
+        "--batch-size", str(batch_size),
+        "--num-samples", str(num_samples),
+        "--crop-style", crop_style,
+        "--output-json", str(results_file),
+    ]
+    if swa_window is not None:
+        cmd.extend(["--swa-window", str(swa_window)])
+    if save_visuals > 0:
+        cmd.extend(["--save-visuals", str(save_visuals), "--output-dir", str(output_dir)])
+
+    print(f"Running: {' '.join(cmd)}")
+
+    # Run evaluation
+    env = os.environ.copy()
+    env["PYTHONPATH"] = "/root/vitok-release"
+    result = subprocess.run(cmd, env=env, capture_output=False)
+
+    if result.returncode != 0:
+        raise RuntimeError(f"Evaluation failed with return code {result.returncode}")
+
+    # Load results
+    if results_file.exists():
+        with open(results_file) as f:
+            stats = json.load(f)
+    else:
+        stats = {"error": "Results file not found"}
+
+    # Encode visuals if saved
+    if save_visuals > 0:
+        visuals = {}
+        grid_path = output_dir / "comparison_grid.jpg"
+        if grid_path.exists():
+            with open(grid_path, "rb") as f:
+                visuals["comparison_grid"] = base64.b64encode(f.read()).decode()
+        stats["visuals"] = visuals
+
+    return stats
+
+
 @app.local_entrypoint()
 def main(
     model: str = "L-64",
     num_samples: int = 5000,
-    max_size: int = 512,
-    batch_size: int = 16,
+    max_size: int = 256,
+    batch_size: int = 64,
     crop_style: str = "native",
     swa_window: int | None = None,
     data: str | None = None,
@@ -224,6 +346,7 @@ def main(
     output_json: str | None = None,
     output_dir: str | None = None,
     save_visuals: int = 8,
+    n_gpus: int = 1,
     list_models: bool = False,
     list_datasets: bool = False,
 ):
@@ -241,6 +364,7 @@ def main(
         output_json: Save results to JSON file
         output_dir: Directory to save visuals (default: results/<model>_<dataset>_<size>)
         save_visuals: Number of sample images to save (default: 8, 0=none)
+        n_gpus: Number of GPUs (1=single A100, 8=8xA100 with torchrun)
         list_models: List available pretrained models and exit
         list_datasets: List available dataset presets and exit
     """
@@ -281,6 +405,7 @@ def main(
     print(f"Crop style: {crop_style}")
     print(f"SWA window: {swa_window}")
     print(f"Save visuals: {save_visuals}")
+    print(f"GPUs: {n_gpus}")
     if dataset:
         print(f"Dataset: {dataset}")
     elif data:
@@ -289,17 +414,33 @@ def main(
         print("Data: COCO val2017 (from vitok-data volume)")
     print(f"\nRunning evaluation on Modal...\n")
 
-    stats = run_eval.remote(
-        model_name=model,
-        num_samples=num_samples,
-        max_size=max_size,
-        batch_size=batch_size,
-        crop_style=crop_style,
-        swa_window=swa_window,
-        data_path=data,
-        dataset=dataset,
-        save_visuals=save_visuals,
-    )
+    if n_gpus > 1:
+        # Multi-GPU with torchrun
+        stats = run_eval_multi_gpu.remote(
+            model_name=model,
+            num_samples=num_samples,
+            max_size=max_size,
+            batch_size=batch_size,
+            crop_style=crop_style,
+            swa_window=swa_window,
+            data_path=data,
+            dataset=dataset,
+            save_visuals=save_visuals,
+            n_gpus=n_gpus,
+        )
+    else:
+        # Single GPU
+        stats = run_eval.remote(
+            model_name=model,
+            num_samples=num_samples,
+            max_size=max_size,
+            batch_size=batch_size,
+            crop_style=crop_style,
+            swa_window=swa_window,
+            data_path=data,
+            dataset=dataset,
+            save_visuals=save_visuals,
+        )
 
     print(f"\n{'='*50}")
     print(f"Evaluation Results: {stats.get('model', model)}")
