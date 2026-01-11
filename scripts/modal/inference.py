@@ -87,27 +87,28 @@ def run_inference(model_name: str, image_bytes: bytes | None = None) -> tuple[by
     os.environ["HF_HOME"] = "/cache/huggingface"
 
     print("\nDownloading weights (or using cache)...")
-    weights_path = download_pretrained(model_name)
-    print(f"  Weights: {weights_path}")
+    result = download_pretrained(model_name)
+    weights_paths = result if isinstance(result, list) else [result]
+    print(f"  Weights: {weights_paths}")
 
     # Commit volume changes so weights persist
     vol.commit()
 
-    # Load encoder and decoder separately
+    # Load weights (merge if split encoder/decoder files)
     print("\nLoading model...")
     device = "cuda" if torch.cuda.is_available() else "cpu"
     dtype = torch.bfloat16 if device == "cuda" else torch.float32
-    weights = load_file(weights_path)
+    weights = {}
+    for path in weights_paths:
+        weights.update(load_file(path))
 
-    # Create encoder-only model
-    encoder = AE(**decode_variant(variant), decoder=False)
-    encoder.to(device=device, dtype=dtype)
+    # Create encoder-only and decoder-only models
+    config = decode_variant(variant)
+    encoder = AE(**config, decoder=False).to(device=device, dtype=dtype)
     encoder.load_state_dict(weights, strict=False)
     encoder.eval()
 
-    # Create decoder-only model
-    decoder = AE(**decode_variant(variant), encoder=False)
-    decoder.to(device=device, dtype=dtype)
+    decoder = AE(**config, encoder=False).to(device=device, dtype=dtype)
     decoder.load_state_dict(weights, strict=False)
     decoder.eval()
 
