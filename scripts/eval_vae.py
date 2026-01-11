@@ -20,6 +20,8 @@ from pathlib import Path
 import torch
 import torchvision.transforms.functional as TF
 
+import torch.distributed as dist
+
 from vitok import AE, decode_variant
 from safetensors.torch import load_file
 
@@ -147,6 +149,10 @@ def evaluate(
     Returns:
         Dictionary with computed metrics
     """
+    # Check if distributed is initialized
+    world_size = dist.get_world_size() if dist.is_initialized() else 1
+    is_distributed = world_size > 1
+
     # Resolve model and variant
     if model_name is not None:
         _, _, variant = get_pretrained_info(model_name)
@@ -172,6 +178,9 @@ def evaluate(
         print(f"Max size: {max_size}, Batch size: {batch_size}")
         print(f"Crop style: {crop_style}, SWA window: {swa_window}")
         print(f"Device: {device}, Dtype: {dtype}")
+        if is_distributed:
+            rank = dist.get_rank()
+            print(f"Distributed: world_size={world_size}, rank={rank}")
 
     # Load encoder and decoder separately for better compilation
     weights = load_file(checkpoint)
@@ -194,8 +203,10 @@ def evaluate(
     patch_size = encoder.spatial_stride
     max_tokens = (max_size // patch_size) ** 2
 
-    # Compile for performance
-    if compile and device.type == "cuda":
+    # Compile for performance (before DDP wrapping)
+    # Note: Disable compile for multi-GPU to avoid shape mismatches with flex_attention
+    do_compile = compile and device.type == "cuda" and not is_distributed
+    if do_compile:
         if verbose:
             print("  Compiling model...")
         encoder = torch.compile(encoder, fullgraph=True)
@@ -219,6 +230,8 @@ def evaluate(
         torch.cuda.empty_cache()
         if verbose:
             print("  Compilation complete.")
+    elif is_distributed and verbose:
+        print("  Skipping compilation for multi-GPU")
 
     if verbose:
         print(f"  Patch size: {patch_size}")
@@ -231,7 +244,8 @@ def evaluate(
     else:
         # Native: preserve aspect ratio, resize longest side
         pp = f"resize_longest_side({max_size})|to_tensor|normalize(minus_one_to_one)|patchify({patch_size}, {max_tokens})"
-    loader = create_dataloader(data, pp, batch_size=batch_size)
+    # Use drop_last=True for distributed to ensure consistent batch sizes across GPUs
+    loader = create_dataloader(data, pp, batch_size=batch_size, drop_last=is_distributed)
 
     # Initialize metrics
     if verbose:

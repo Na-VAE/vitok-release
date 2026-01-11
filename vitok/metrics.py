@@ -58,7 +58,12 @@ def calculate_frechet_distance(mu1, sigma1, mu2, sigma2, eps=1e-6):
 
 def distributed_mean_cov(features: torch.Tensor) -> Tuple[np.ndarray, np.ndarray]:
     """Compute mean and covariance across distributed ranks."""
-    features = features.to(dtype=torch.float64)
+    # Move to CUDA for NCCL all_reduce if distributed
+    if dist.is_initialized():
+        features = features.to(device='cuda', dtype=torch.float64)
+    else:
+        features = features.to(dtype=torch.float64)
+
     n_local = torch.tensor(float(features.shape[0]), device=features.device, dtype=torch.float64)
     sum_local = features.sum(dim=0)
 
@@ -91,8 +96,9 @@ def dist_mean_1d(values: torch.Tensor) -> float:
         count = torch.tensor(float(values.numel()), dtype=torch.float64)
 
     if dist.is_initialized():
-        sum_val = sum_val.to(values.device if values.numel() > 0 else 'cuda')
-        count = count.to(sum_val.device)
+        # Move to CUDA for NCCL all_reduce
+        sum_val = sum_val.to(device='cuda')
+        count = count.to(device='cuda')
         dist.all_reduce(sum_val, op=dist.ReduceOp.SUM)
         dist.all_reduce(count, op=dist.ReduceOp.SUM)
 
