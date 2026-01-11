@@ -41,10 +41,16 @@ from vitok.pretrained import download_pretrained, get_pretrained_info
 def load_vitok(model_name: str = "L-64", device: str = "cuda", dtype=torch.bfloat16):
     """Load ViTok model."""
     _, _, variant = get_pretrained_info(model_name)
-    weights_path = download_pretrained(model_name)
+    result = download_pretrained(model_name)
+    weights_paths = result if isinstance(result, list) else [result]
+
+    # Load and merge weights
+    weights = {}
+    for path in weights_paths:
+        weights.update(load_file(path))
 
     model = AE(**decode_variant(variant))
-    model.load_state_dict(load_file(weights_path))
+    model.load_state_dict(weights)
     model.to(device=device, dtype=dtype)
     model.eval()
 

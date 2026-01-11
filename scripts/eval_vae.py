@@ -16,6 +16,7 @@ Usage:
 """
 import argparse
 import os
+import time
 from pathlib import Path
 import torch
 import torchvision.transforms.functional as TF
@@ -30,6 +31,63 @@ from vitok.data import create_dataloader
 from vitok.pp.io import postprocess
 from vitok.metrics import MetricCalculator
 from vitok.pretrained import download_pretrained, get_pretrained_info
+
+
+def estimate_model_flops(model, batch, verbose: bool = False) -> int:
+    """Estimate FLOPs for a forward pass using torch.utils.flop_counter.
+
+    Args:
+        model: The model to profile
+        batch: Input batch dict
+        verbose: Print detailed breakdown
+
+    Returns:
+        Estimated FLOPs for the forward pass
+    """
+    try:
+        from torch.utils.flop_counter import FlopCounterMode
+
+        flop_counter = FlopCounterMode(display=False)
+        with flop_counter:
+            with torch.no_grad():
+                if hasattr(model, 'encode'):
+                    _ = model.encode(batch)
+                elif hasattr(model, 'decode'):
+                    _ = model.decode(batch)
+                else:
+                    _ = model(batch)
+
+        total_flops = flop_counter.get_total_flops()
+
+        if verbose:
+            print(f"  FLOPs breakdown:")
+            for op, count in flop_counter.get_flop_counts().items():
+                if count > 0:
+                    print(f"    {op}: {count/1e9:.2f} GFLOPs")
+
+        return total_flops
+    except Exception as e:
+        # FlopCounterMode may not be available on all PyTorch versions
+        return 0
+
+
+def get_memory_stats(device: torch.device) -> dict:
+    """Get current GPU memory statistics.
+
+    Args:
+        device: CUDA device
+
+    Returns:
+        Dict with memory stats in GB
+    """
+    if device.type != "cuda":
+        return {}
+
+    return {
+        "memory_allocated_gb": torch.cuda.memory_allocated(device) / (1024**3),
+        "memory_reserved_gb": torch.cuda.memory_reserved(device) / (1024**3),
+        "max_memory_allocated_gb": torch.cuda.max_memory_allocated(device) / (1024**3),
+    }
 
 
 def save_comparison_grid(
@@ -120,6 +178,7 @@ def evaluate(
     swa_window: int | None = None,
     metrics: tuple[str, ...] = ("fid", "fdd", "ssim", "psnr"),
     compile: bool = True,
+    float8_mode: str | None = None,
     device: torch.device | None = None,
     dtype: torch.dtype | None = None,
     verbose: bool = True,
@@ -140,6 +199,7 @@ def evaluate(
         swa_window: Sliding window attention radius (None=full attention)
         metrics: Tuple of metrics to compute ("fid", "fdd", "ssim", "psnr")
         compile: Whether to use torch.compile
+        float8_mode: Quantization mode - "inference" for FP8/INT8, None for bf16
         device: Device to use (default: auto-detect)
         dtype: Data type (default: bf16 on CUDA, fp32 on CPU)
         verbose: Print progress
@@ -156,13 +216,18 @@ def evaluate(
     # Resolve model and variant
     if model_name is not None:
         _, _, variant = get_pretrained_info(model_name)
-        checkpoint = download_pretrained(model_name)
+        checkpoint_paths = download_pretrained(model_name)
+        # Normalize to list
+        if isinstance(checkpoint_paths, str):
+            checkpoint_paths = [checkpoint_paths]
         if verbose:
             print(f"Model: {model_name}")
             print(f"  Variant: {variant}")
-            print(f"  Checkpoint: {checkpoint}")
+            print(f"  Weights: {checkpoint_paths}")
     elif checkpoint is None:
         raise ValueError("Either checkpoint or model_name must be provided")
+    else:
+        checkpoint_paths = [checkpoint]
 
     if variant is None:
         raise ValueError("variant must be provided when using checkpoint path")
@@ -182,16 +247,17 @@ def evaluate(
             rank = dist.get_rank()
             print(f"Distributed: world_size={world_size}, rank={rank}")
 
-    # Load encoder and decoder separately for better compilation
-    weights = load_file(checkpoint)
+    # Load weights (merge if split encoder/decoder files)
+    weights = {}
+    for path in checkpoint_paths:
+        weights.update(load_file(path))
 
-    encoder = AE(**decode_variant(variant), decoder=False)
-    encoder.to(device=device, dtype=dtype)
+    config = decode_variant(variant)
+    encoder = AE(**config, decoder=False, float8_mode=float8_mode).to(device=device, dtype=dtype)
     encoder.load_state_dict(weights, strict=False)
     encoder.eval()
 
-    decoder = AE(**decode_variant(variant), encoder=False)
-    decoder.to(device=device, dtype=dtype)
+    decoder = AE(**config, encoder=False, float8_mode=float8_mode).to(device=device, dtype=dtype)
     decoder.load_state_dict(weights, strict=False)
     decoder.eval()
 
@@ -237,6 +303,10 @@ def evaluate(
         print(f"  Patch size: {patch_size}")
         print(f"  Max tokens: {max_tokens}")
 
+    # Reset memory stats before eval
+    if device.type == "cuda":
+        torch.cuda.reset_peak_memory_stats(device)
+
     # Create dataloader with appropriate preprocessing
     if crop_style == "adm_square":
         # ADM-style: center crop to square
@@ -257,7 +327,14 @@ def evaluate(
     visual_originals = []
     visual_recons = []
 
+    # Timing and FLOPs tracking
+    inference_times = []
+    encoder_flops = 0
+    decoder_flops = 0
+
     samples_seen = 0
+    eval_start_time = time.perf_counter()
+
     for batch in loader:
         if samples_seen >= num_samples:
             break
@@ -266,9 +343,24 @@ def evaluate(
         if "patches" in batch:
             batch["patches"] = batch["patches"].to(dtype)
 
+        # Time inference with proper CUDA synchronization
+        if device.type == "cuda":
+            torch.cuda.synchronize()
+        batch_start = time.perf_counter()
+
         with torch.no_grad(), torch.autocast(device_type="cuda", dtype=dtype, enabled=device.type == "cuda"):
             encoded = encoder.encode(batch)
             output = decoder.decode(encoded)
+
+        if device.type == "cuda":
+            torch.cuda.synchronize()
+        batch_time = time.perf_counter() - batch_start
+        inference_times.append(batch_time)
+
+        # Estimate FLOPs on first batch only (expensive operation)
+        if samples_seen == 0 and device.type == "cuda":
+            encoder_flops = estimate_model_flops(encoder, batch, verbose=False)
+            decoder_flops = estimate_model_flops(decoder, encoded, verbose=False)
 
         # Use [-1, 1] range for metrics (SSIM/PSNR expect data_range=2.0, FID/FDD convert internally)
         # For square crops, images are uniform size so no unpacking needed
@@ -290,7 +382,12 @@ def evaluate(
 
         samples_seen += len(batch["patches"])
         if verbose and samples_seen % (batch_size * 25) == 0:
-            print(f"  Processed {samples_seen}/{num_samples} samples")
+            elapsed = time.perf_counter() - eval_start_time
+            throughput = samples_seen / elapsed
+            print(f"  Processed {samples_seen}/{num_samples} samples ({throughput:.1f} img/s)")
+
+    eval_end_time = time.perf_counter()
+    total_eval_time = eval_end_time - eval_start_time
 
     # Gather results
     stats = metric_calc.gather()
@@ -300,12 +397,56 @@ def evaluate(
     stats["crop_style"] = crop_style
     stats["swa_window"] = swa_window
     stats["max_size"] = max_size
+    stats["batch_size"] = batch_size
+    stats["compiled"] = do_compile
+
+    # Add timing stats
+    stats["total_time_sec"] = total_eval_time
+    stats["throughput_img_per_sec"] = samples_seen / total_eval_time if total_eval_time > 0 else 0
+    if inference_times:
+        # Skip first batch (warmup) for latency stats
+        latency_times = inference_times[1:] if len(inference_times) > 1 else inference_times
+        stats["avg_batch_latency_ms"] = sum(latency_times) / len(latency_times) * 1000
+        stats["avg_img_latency_ms"] = stats["avg_batch_latency_ms"] / batch_size
+
+    # Add memory stats
+    memory_stats = get_memory_stats(device)
+    stats.update(memory_stats)
+
+    # Add FLOPs stats
+    if encoder_flops > 0 or decoder_flops > 0:
+        total_flops = encoder_flops + decoder_flops
+        stats["encoder_gflops"] = encoder_flops / 1e9
+        stats["decoder_gflops"] = decoder_flops / 1e9
+        stats["total_gflops_per_img"] = total_flops / 1e9
 
     if verbose:
         print(f"\nResults ({samples_seen} samples):")
-        for k, v in sorted(stats.items()):
-            if isinstance(v, (int, float)):
-                print(f"  {k}: {v:.4f}")
+        # Print quality metrics first
+        print("  Quality metrics:")
+        for k in ["fid", "fdd", "ssim", "psnr"]:
+            if k in stats:
+                print(f"    {k.upper()}: {stats[k]:.4f}")
+
+        # Print performance stats
+        print("  Performance:")
+        print(f"    Total time: {total_eval_time:.1f}s")
+        print(f"    Throughput: {stats['throughput_img_per_sec']:.1f} img/s")
+        if "avg_img_latency_ms" in stats:
+            print(f"    Latency: {stats['avg_img_latency_ms']:.2f} ms/img")
+
+        # Print memory stats
+        if "max_memory_allocated_gb" in stats:
+            print("  Memory:")
+            print(f"    Peak allocated: {stats['max_memory_allocated_gb']:.2f} GB")
+            print(f"    Reserved: {stats['memory_reserved_gb']:.2f} GB")
+
+        # Print FLOPs stats
+        if "total_gflops_per_img" in stats:
+            print("  FLOPs (per image):")
+            print(f"    Encoder: {stats['encoder_gflops']:.2f} GFLOPs")
+            print(f"    Decoder: {stats['decoder_gflops']:.2f} GFLOPs")
+            print(f"    Total: {stats['total_gflops_per_img']:.2f} GFLOPs")
 
     # Save visuals
     if save_visuals > 0 and output_dir is not None:

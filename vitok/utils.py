@@ -95,6 +95,75 @@ def cleanup_distributed():
         dist.destroy_process_group()
 
 
+def load_pretrained_weights(
+    model: nn.Module,
+    pretrained: str,
+    device: torch.device,
+    dtype: torch.dtype = torch.bfloat16,
+    rank: int = 0,
+    freeze_encoder: bool = False,
+) -> nn.Module:
+    """Load pretrained weights for finetuning. Must be called BEFORE FSDP/DDP wrapping.
+
+    Supports both single combined weights files and split encoder/decoder files.
+
+    Args:
+        model: The model to load weights into
+        pretrained: Either a local .safetensors file path or a pretrained model name
+        device: Device to load weights onto
+        dtype: Data type for model parameters
+        rank: Process rank for distributed training (only rank 0 logs)
+        freeze_encoder: If True, freeze encoder modules for decoder-only finetuning
+
+    Returns:
+        The model with loaded weights
+    """
+    from pathlib import Path
+    from safetensors.torch import load_file
+
+    # Determine weights path(s)
+    if Path(pretrained).is_file():
+        weights_paths = [pretrained]
+    else:
+        from vitok.pretrained import download_pretrained
+        result = download_pretrained(pretrained)
+        weights_paths = result if isinstance(result, list) else [result]
+
+    if rank == 0:
+        print(f"Loading weights from: {weights_paths}")
+
+    # Load, clean keys, and cast to dtype in one pass
+    weights = {}
+    for path in weights_paths:
+        for key, value in load_file(path, device=str(device)).items():
+            clean_key = key.replace("_orig_mod.", "")
+            weights[clean_key] = value.to(dtype=dtype)
+
+    # Load into model with strict=False to allow partial loading
+    missing_keys, unexpected_keys = model.load_state_dict(weights, strict=False)
+
+    if rank == 0:
+        if missing_keys:
+            print(f"Missing keys ({len(missing_keys)}): {missing_keys[:10]}{'...' if len(missing_keys) > 10 else ''}")
+        if unexpected_keys:
+            print(f"Unexpected keys ({len(unexpected_keys)}): {unexpected_keys[:10]}{'...' if len(unexpected_keys) > 10 else ''}")
+        if not missing_keys and not unexpected_keys:
+            print("All weights loaded successfully!")
+
+    # Freeze encoder if requested
+    if freeze_encoder:
+        encoder_prefixes = ('patch_embed', 'encoder_blocks', 'to_code', 'output_fn', 'cls_token', 'reg_token')
+        frozen_count = 0
+        for name, p in model.named_parameters():
+            if name.startswith(encoder_prefixes):
+                p.requires_grad = False
+                frozen_count += 1
+        if rank == 0:
+            print(f"Froze {frozen_count} encoder parameters")
+
+    return model
+
+
 def save_checkpoint(
     train_state: Dict[str, Any],
     checkpoint_root: str,

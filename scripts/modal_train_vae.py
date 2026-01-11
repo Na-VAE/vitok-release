@@ -141,6 +141,8 @@ def train_vae(
     batch_size: int = 64,  # Per GPU, total = 64*8 = 512
     wandb_project: str = None,
     wandb_name: str = None,
+    pretrained: str = None,  # Pretrained model name for finetuning
+    freeze_encoder: bool = False,  # Freeze encoder for decoder-only finetuning
 ):
     """Run VAE training on 8xA100 with FSDP."""
     import subprocess
@@ -173,6 +175,10 @@ def train_vae(
         cmd.extend(["--wandb_project", wandb_project])
     if wandb_name:
         cmd.extend(["--wandb_name", wandb_name])
+    if pretrained:
+        cmd.extend(["--pretrained", pretrained])
+    if freeze_encoder:
+        cmd.append("--freeze_encoder")
 
     print(f"Running on 8xA100 with FSDP:")
     print(f"  {' '.join(cmd)}")
@@ -203,6 +209,8 @@ def train_vae_debug(
     batch_size: int = 64,  # Per GPU, total = 64*4 = 256
     wandb_project: str = None,
     wandb_name: str = None,
+    pretrained: str = None,  # Pretrained model name for finetuning
+    freeze_encoder: bool = False,  # Freeze encoder for decoder-only finetuning
 ):
     """Run VAE training on 4xA10G with FSDP (for testing/debug)."""
     import subprocess
@@ -234,6 +242,10 @@ def train_vae_debug(
         cmd.extend(["--wandb_project", wandb_project])
     if wandb_name:
         cmd.extend(["--wandb_name", wandb_name])
+    if pretrained:
+        cmd.extend(["--pretrained", pretrained])
+    if freeze_encoder:
+        cmd.append("--freeze_encoder")
 
     print(f"Running on 4xA10G with FSDP:")
     print(f"  {' '.join(cmd)}")
@@ -254,6 +266,8 @@ def main(
     sync: bool = False,
     sync_only: bool = False,
     debug: bool = False,
+    pretrained: str = None,  # Pretrained model name for finetuning
+    freeze_encoder: bool = False,  # Freeze encoder for decoder-only finetuning
 ):
     """Local entrypoint for Modal.
 
@@ -267,6 +281,8 @@ def main(
         sync: Sync code before running (default: False)
         sync_only: Only sync code, don't run training (default: False)
         debug: Debug mode - uses 4xA10G with smaller dataset (default: False)
+        pretrained: Pretrained model name for finetuning (default: None)
+        freeze_encoder: Freeze encoder for decoder-only finetuning (default: False)
     """
     # Sync code if requested
     if sync or sync_only:
@@ -319,6 +335,8 @@ def main(
             batch_size=batch_size,
             wandb_project=wandb_project,
             wandb_name=wandb_name,
+            pretrained=pretrained,
+            freeze_encoder=freeze_encoder,
         )
     else:
         result = train_vae.remote(
@@ -328,6 +346,8 @@ def main(
             batch_size=batch_size,
             wandb_project=wandb_project,
             wandb_name=wandb_name,
+            pretrained=pretrained,
+            freeze_encoder=freeze_encoder,
         )
 
     print(f"Training completed with return code: {result}")
