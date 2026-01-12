@@ -87,8 +87,7 @@ def run_inference(model_name: str, image_bytes: bytes | None = None) -> tuple[by
     os.environ["HF_HOME"] = "/cache/huggingface"
 
     print("\nDownloading weights (or using cache)...")
-    result = download_pretrained(model_name)
-    weights_paths = result if isinstance(result, list) else [result]
+    weights_paths = download_pretrained(model_name)
     print(f"  Weights: {weights_paths}")
 
     # Commit volume changes so weights persist

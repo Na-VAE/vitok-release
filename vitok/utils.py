@@ -126,8 +126,7 @@ def load_pretrained_weights(
         weights_paths = [pretrained]
     else:
         from vitok.pretrained import download_pretrained
-        result = download_pretrained(pretrained)
-        weights_paths = result if isinstance(result, list) else [result]
+        weights_paths = download_pretrained(pretrained)
 
     if rank == 0:
         print(f"Loading weights from: {weights_paths}")

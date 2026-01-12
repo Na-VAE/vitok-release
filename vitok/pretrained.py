@@ -58,7 +58,7 @@ def is_split_weights(name: str) -> bool:
     return isinstance(filenames, list)
 
 
-def download_pretrained(name: str, cache_dir: str | None = None) -> str | List[str]:
+def download_pretrained(name: str, cache_dir: str | None = None) -> list[str]:
     """Download pretrained weights from HuggingFace Hub.
 
     Args:
@@ -66,7 +66,7 @@ def download_pretrained(name: str, cache_dir: str | None = None) -> str | List[s
         cache_dir: Optional cache directory (uses HF_HOME by default)
 
     Returns:
-        Path to downloaded weights file, or list of paths for split weights
+        List of paths to downloaded weight files
     """
     repo_id, filenames, _ = get_pretrained_info(name)
 
@@ -77,8 +77,8 @@ def download_pretrained(name: str, cache_dir: str | None = None) -> str | List[s
             for f in filenames
         ]
     else:
-        # Single combined weights file
-        return hf_hub_download(repo_id=repo_id, filename=filenames, cache_dir=cache_dir)
+        # Single combined weights file - wrap in list for consistent API
+        return [hf_hub_download(repo_id=repo_id, filename=filenames, cache_dir=cache_dir)]
 
 
 def list_pretrained() -> list[str]:

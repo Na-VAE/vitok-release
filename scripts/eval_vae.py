@@ -32,62 +32,11 @@ from vitok.pp.io import postprocess
 from vitok.metrics import MetricCalculator
 from vitok.pretrained import download_pretrained, get_pretrained_info
 
-
-def estimate_model_flops(model, batch, verbose: bool = False) -> int:
-    """Estimate FLOPs for a forward pass using torch.utils.flop_counter.
-
-    Args:
-        model: The model to profile
-        batch: Input batch dict
-        verbose: Print detailed breakdown
-
-    Returns:
-        Estimated FLOPs for the forward pass
-    """
-    try:
-        from torch.utils.flop_counter import FlopCounterMode
-
-        flop_counter = FlopCounterMode(display=False)
-        with flop_counter:
-            with torch.no_grad():
-                if hasattr(model, 'encode'):
-                    _ = model.encode(batch)
-                elif hasattr(model, 'decode'):
-                    _ = model.decode(batch)
-                else:
-                    _ = model(batch)
-
-        total_flops = flop_counter.get_total_flops()
-
-        if verbose:
-            print(f"  FLOPs breakdown:")
-            for op, count in flop_counter.get_flop_counts().items():
-                if count > 0:
-                    print(f"    {op}: {count/1e9:.2f} GFLOPs")
-
-        return total_flops
-    except Exception as e:
-        # FlopCounterMode may not be available on all PyTorch versions
-        return 0
-
-
-def get_memory_stats(device: torch.device) -> dict:
-    """Get current GPU memory statistics.
-
-    Args:
-        device: CUDA device
-
-    Returns:
-        Dict with memory stats in GB
-    """
-    if device.type != "cuda":
-        return {}
-
-    return {
-        "memory_allocated_gb": torch.cuda.memory_allocated(device) / (1024**3),
-        "memory_reserved_gb": torch.cuda.memory_reserved(device) / (1024**3),
-        "max_memory_allocated_gb": torch.cuda.max_memory_allocated(device) / (1024**3),
-    }
+# FlopCounter for measuring compute (optional, may not be available in all PyTorch versions)
+try:
+    from torch.utils.flop_counter import FlopCounterMode
+except ImportError:
+    FlopCounterMode = None
 
 
 def save_comparison_grid(
@@ -217,9 +166,6 @@ def evaluate(
     if model_name is not None:
         _, _, variant = get_pretrained_info(model_name)
         checkpoint_paths = download_pretrained(model_name)
-        # Normalize to list
-        if isinstance(checkpoint_paths, str):
-            checkpoint_paths = [checkpoint_paths]
         if verbose:
             print(f"Model: {model_name}")
             print(f"  Variant: {variant}")
@@ -243,6 +189,8 @@ def evaluate(
         print(f"Max size: {max_size}, Batch size: {batch_size}")
         print(f"Crop style: {crop_style}, SWA window: {swa_window}")
         print(f"Device: {device}, Dtype: {dtype}")
+        if float8_mode:
+            print(f"Quantization: {float8_mode} (FP8 on H100+, INT8 on A100)")
         if is_distributed:
             rank = dist.get_rank()
             print(f"Distributed: world_size={world_size}, rank={rank}")
@@ -253,13 +201,24 @@ def evaluate(
         weights.update(load_file(path))
 
     config = decode_variant(variant)
-    encoder = AE(**config, decoder=False, float8_mode=float8_mode).to(device=device, dtype=dtype)
+    # Create models WITHOUT float8_mode - we apply quantization AFTER loading weights
+    encoder = AE(**config, decoder=False, float8_mode=None).to(device=device, dtype=dtype)
     encoder.load_state_dict(weights, strict=False)
     encoder.eval()
 
-    decoder = AE(**config, encoder=False, float8_mode=float8_mode).to(device=device, dtype=dtype)
+    decoder = AE(**config, encoder=False, float8_mode=None).to(device=device, dtype=dtype)
     decoder.load_state_dict(weights, strict=False)
     decoder.eval()
+
+    # Apply quantization AFTER loading weights (if requested)
+    if float8_mode:
+        from vitok.models.ae import _apply_float8
+        if verbose:
+            print(f"  Applying {float8_mode} quantization...")
+        for block in encoder.encoder_blocks:
+            _apply_float8(block, float8_mode)
+        for block in decoder.decoder_blocks:
+            _apply_float8(block, float8_mode)
 
     # Set SWA window if specified (override the model's default)
     if swa_window is not None:
@@ -357,10 +316,15 @@ def evaluate(
         batch_time = time.perf_counter() - batch_start
         inference_times.append(batch_time)
 
-        # Estimate FLOPs on first batch only (expensive operation)
-        if samples_seen == 0 and device.type == "cuda":
-            encoder_flops = estimate_model_flops(encoder, batch, verbose=False)
-            decoder_flops = estimate_model_flops(decoder, encoded, verbose=False)
+        # Estimate FLOPs on first batch only
+        if samples_seen == 0 and FlopCounterMode is not None:
+            with FlopCounterMode(display=False) as fc:
+                _ = encoder.encode(batch)
+            encoder_flops = fc.get_total_flops()
+
+            with FlopCounterMode(display=False) as fc:
+                _ = decoder.decode(encoded)
+            decoder_flops = fc.get_total_flops()
 
         # Use [-1, 1] range for metrics (SSIM/PSNR expect data_range=2.0, FID/FDD convert internally)
         # For square crops, images are uniform size so no unpacking needed
@@ -399,6 +363,7 @@ def evaluate(
     stats["max_size"] = max_size
     stats["batch_size"] = batch_size
     stats["compiled"] = do_compile
+    stats["float8_mode"] = float8_mode
 
     # Add timing stats
     stats["total_time_sec"] = total_eval_time
@@ -410,8 +375,10 @@ def evaluate(
         stats["avg_img_latency_ms"] = stats["avg_batch_latency_ms"] / batch_size
 
     # Add memory stats
-    memory_stats = get_memory_stats(device)
-    stats.update(memory_stats)
+    if device.type == "cuda":
+        stats["memory_allocated_gb"] = torch.cuda.memory_allocated(device) / (1024**3)
+        stats["memory_reserved_gb"] = torch.cuda.memory_reserved(device) / (1024**3)
+        stats["max_memory_allocated_gb"] = torch.cuda.max_memory_allocated(device) / (1024**3)
 
     # Add FLOPs stats
     if encoder_flops > 0 or decoder_flops > 0:
@@ -481,9 +448,11 @@ def main():
     parser.add_argument("--swa-window", type=int, default=None, help="Sliding window attention radius")
     parser.add_argument("--metrics", nargs="+", default=["fid", "fdd", "ssim", "psnr"], help="Metrics to compute")
     parser.add_argument("--no-compile", action="store_true", help="Disable torch.compile")
+    parser.add_argument("--float8", action="store_true", help="Enable FP8/INT8 quantization (FP8 on H100+, INT8 on A100)")
     parser.add_argument("--save-visuals", type=int, default=0, help="Number of sample images to save")
     parser.add_argument("--output-dir", default=None, help="Directory to save visuals")
     parser.add_argument("--output-json", default=None, help="Save results to JSON file")
+    parser.add_argument("--output-csv", default=None, help="Save results to CSV file (one row per run)")
     args = parser.parse_args()
 
     # Setup distributed (for multi-GPU)
@@ -502,6 +471,7 @@ def main():
             swa_window=args.swa_window,
             metrics=tuple(args.metrics),
             compile=not args.no_compile,
+            float8_mode="inference" if args.float8 else None,
             device=device,
             verbose=(rank == 0),
             save_visuals=args.save_visuals if rank == 0 else 0,
@@ -514,6 +484,35 @@ def main():
             with open(args.output_json, "w") as f:
                 json.dump(stats, f, indent=2)
             print(f"\nResults saved to: {args.output_json}")
+
+        # Save results to CSV (only rank 0)
+        if rank == 0 and args.output_csv:
+            import csv
+            from datetime import datetime
+
+            # Define CSV columns (flattened metrics)
+            csv_columns = [
+                "timestamp", "model", "variant", "data", "max_size", "crop_style",
+                "batch_size", "samples", "compiled", "float8_mode",
+                "fid", "fdd", "ssim", "psnr",
+                "throughput_img_per_sec", "avg_img_latency_ms",
+                "max_memory_allocated_gb",
+                "encoder_gflops", "decoder_gflops", "total_gflops_per_img",
+            ]
+
+            csv_path = Path(args.output_csv)
+            write_header = not csv_path.exists()
+
+            # Add timestamp and data path to stats
+            row = {"timestamp": datetime.now().isoformat(), "data": args.data}
+            row.update({k: stats.get(k, "") for k in csv_columns if k not in row})
+
+            with open(csv_path, "a", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=csv_columns, extrasaction="ignore")
+                if write_header:
+                    writer.writeheader()
+                writer.writerow(row)
+            print(f"Results appended to: {args.output_csv}")
     finally:
         cleanup_distributed()
 

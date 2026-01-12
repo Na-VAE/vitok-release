@@ -79,8 +79,7 @@ def run_single_config(
 
     # Download and load model
     _, _, variant = get_pretrained_info(model_name)
-    result = download_pretrained(model_name)
-    weights_paths = result if isinstance(result, list) else [result]
+    weights_paths = download_pretrained(model_name)
 
     weights = {}
     for p in weights_paths:

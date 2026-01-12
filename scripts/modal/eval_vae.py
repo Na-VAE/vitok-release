@@ -48,8 +48,8 @@ image = (
     modal.Image.debian_slim(python_version="3.11")
     .apt_install("wget", "unzip", "curl")
     .pip_install(
-        "torch>=2.4.0",
-        "torchvision>=0.19.0",
+        "torch==2.6.0",
+        "torchvision==0.21.0",
         "safetensors>=0.4.0",
         "huggingface_hub>=0.23.0",
         "pillow>=10.0.0",
@@ -60,6 +60,7 @@ image = (
         "dino-perceptual>=0.1.0",
         "torchmetrics>=1.0.0",
         "einops",
+        "torchao>=0.5.0",
     )
     .add_local_dir("vitok", remote_path="/root/vitok-release/vitok")
     .add_local_file("scripts/eval_vae.py", remote_path="/root/vitok-release/scripts/eval_vae.py")
@@ -103,7 +104,7 @@ def download_coco_val(cache_dir: str) -> str:
 
 @app.function(
     image=image,
-    gpu="A100-80GB",
+    gpu="H100",
     volumes={"/cache": weights_vol, "/data": data_vol},
     secrets=[modal.Secret.from_name("huggingface-secret")],
     timeout=3600,
@@ -118,6 +119,8 @@ def run_eval(
     data_path: str | None = None,
     dataset: str | None = None,
     save_visuals: int = 0,
+    compile: bool = True,
+    float8: bool = False,
 ) -> dict:
     """Run VAE evaluation using the shared evaluate() function.
 
@@ -196,7 +199,8 @@ def run_eval(
         crop_style=crop_style,
         swa_window=swa_window,
         metrics=("fid", "fdd", "ssim", "psnr"),
-        compile=True,
+        compile=compile,
+        float8_mode="inference" if float8 else None,
         verbose=True,
         save_visuals=save_visuals,
         output_dir=output_dir,
@@ -347,6 +351,8 @@ def main(
     output_dir: str | None = None,
     save_visuals: int = 8,
     n_gpus: int = 1,
+    no_compile: bool = False,
+    float8: bool = False,
     list_models: bool = False,
     list_datasets: bool = False,
 ):
@@ -406,6 +412,8 @@ def main(
     print(f"SWA window: {swa_window}")
     print(f"Save visuals: {save_visuals}")
     print(f"GPUs: {n_gpus}")
+    print(f"Compile: {not no_compile}")
+    print(f"Float8: {float8}")
     if dataset:
         print(f"Dataset: {dataset}")
     elif data:
@@ -440,6 +448,8 @@ def main(
             data_path=data,
             dataset=dataset,
             save_visuals=save_visuals,
+            compile=not no_compile,
+            float8=float8,
         )
 
     print(f"\n{'='*50}")
