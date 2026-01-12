@@ -11,8 +11,11 @@ Usage:
     # Full options
     python scripts/eval_vae.py --model L-64 --data ./data/coco/val2017 --max-size 512 --num-samples 5000
 
-    # Modal (recommended for GPU)
-    modal run scripts/eval_vae.py --model L-64 --num-samples 5000
+    # Run on Modal cloud GPU (recommended - no local GPU needed!)
+    python scripts/eval_vae.py --modal --model L-64 --num-samples 5000
+
+    # Modal with dataset preset (coco-val, imagenet-val, div8k)
+    python scripts/eval_vae.py --modal --model L-64 --dataset coco-val
 """
 import argparse
 import os
@@ -316,15 +319,20 @@ def evaluate(
         batch_time = time.perf_counter() - batch_start
         inference_times.append(batch_time)
 
-        # Estimate FLOPs on first batch only
-        if samples_seen == 0 and FlopCounterMode is not None:
-            with FlopCounterMode(display=False) as fc:
-                _ = encoder.encode(batch)
-            encoder_flops = fc.get_total_flops()
+        # Estimate FLOPs on first batch only (skip for float8 training mode - incompatible with FlopCounter)
+        # Also skip if flex_attention (SWA) is used - FlopCounterMode doesn't support it
+        if samples_seen == 0 and FlopCounterMode is not None and float8_mode != "training":
+            try:
+                with FlopCounterMode(display=False) as fc:
+                    _ = encoder.encode(batch)
+                encoder_flops = fc.get_total_flops()
 
-            with FlopCounterMode(display=False) as fc:
-                _ = decoder.decode(encoded)
-            decoder_flops = fc.get_total_flops()
+                with FlopCounterMode(display=False) as fc:
+                    _ = decoder.decode(encoded)
+                decoder_flops = fc.get_total_flops()
+            except NotImplementedError:
+                # FlopCounterMode doesn't support flex_attention (used with SWA)
+                pass
 
         # Use [-1, 1] range for metrics (SSIM/PSNR expect data_range=2.0, FID/FDD convert internally)
         # For square crops, images are uniform size so no unpacking needed
@@ -434,13 +442,146 @@ def evaluate(
     return stats
 
 
+def _run_on_modal(args):
+    """Run evaluation on Modal cloud GPU."""
+    import modal
+    from scripts.modal_config import (
+        EVAL_CONFIG,
+        DATASET_PATHS,
+        eval_image,
+        weights_vol,
+        data_vol,
+        hf_secret,
+    )
+
+    # Resolve data path from dataset preset or args
+    if args.dataset:
+        data_path = DATASET_PATHS.get(args.dataset, f"/data/{args.dataset}")
+    elif args.data:
+        data_path = args.data
+    else:
+        # Default to COCO
+        data_path = DATASET_PATHS["coco-val"]
+
+    # Print config
+    print(f"Running on Modal cloud GPU")
+    print(f"  Model: {args.model or args.checkpoint}")
+    print(f"  Data: {data_path}")
+    print(f"  Samples: {args.num_samples}")
+    print(f"  Max size: {args.max_size}")
+    print()
+
+    # Build image with vitok code
+    image = (
+        eval_image
+        .add_local_dir("vitok", remote_path="/root/vitok-release/vitok")
+        .add_local_file("scripts/eval_vae.py", remote_path="/root/vitok-release/scripts/eval_vae.py")
+    )
+
+    app = modal.App("vitok-eval")
+
+    # Capture args for closure
+    _model = args.model
+    _checkpoint = args.checkpoint
+    _variant = args.variant
+    _data_path = data_path
+    _max_size = args.max_size
+    _batch_size = args.batch_size
+    _num_samples = args.num_samples
+    _crop_style = args.crop_style
+    _swa_window = args.swa_window
+    _metrics = tuple(args.metrics)
+    _compile = not args.no_compile
+    _float8 = args.float8
+    _save_visuals = args.save_visuals
+
+    @app.function(image=image, serialized=True, **EVAL_CONFIG)
+    def remote_evaluate():
+        import sys
+        import os
+
+        sys.path.insert(0, "/root/vitok-release")
+        os.environ["HF_HOME"] = "/cache/huggingface"
+
+        # Check if data exists, download COCO if needed
+        from pathlib import Path
+        resolved_data = _data_path
+        if resolved_data.startswith("/data") and not Path(resolved_data).exists():
+            if "coco" in resolved_data:
+                print(f"Dataset not cached at {resolved_data}, downloading COCO val2017...")
+                coco_dir = Path("/data/coco/val2017")
+                coco_dir.parent.mkdir(parents=True, exist_ok=True)
+                zip_path = coco_dir.parent / "val2017.zip"
+                os.system(f"wget -q --show-progress -O {zip_path} http://images.cocodataset.org/zips/val2017.zip")
+                os.system(f"unzip -q {zip_path} -d {coco_dir.parent}")
+                os.remove(zip_path)
+                resolved_data = str(coco_dir)
+                # Note: Volume commit happens automatically on function exit
+            else:
+                raise FileNotFoundError(
+                    f"Dataset not found at {resolved_data}. "
+                    f"Run 'modal run scripts/modal/setup_data.py' to cache datasets."
+                )
+
+        from scripts.eval_vae import evaluate
+        return evaluate(
+            model_name=_model,
+            checkpoint=_checkpoint,
+            variant=_variant,
+            data=resolved_data,
+            max_size=_max_size,
+            batch_size=_batch_size,
+            num_samples=_num_samples,
+            crop_style=_crop_style,
+            swa_window=_swa_window,
+            metrics=_metrics,
+            compile=_compile,
+            float8_mode=_float8,
+            save_visuals=_save_visuals,
+            output_dir="/tmp/eval_output" if _save_visuals > 0 else None,
+        )
+
+    # Run on Modal
+    with app.run():
+        stats = remote_evaluate.remote()
+
+    # Print results
+    print(f"\n{'='*50}")
+    print(f"Evaluation Results: {stats.get('model', args.model)}")
+    print(f"{'='*50}")
+    print(f"Variant: {stats.get('variant', 'N/A')}")
+    print(f"Samples: {stats.get('samples', 'N/A')}")
+    print()
+    print("Metrics:")
+    for k in ["fid", "fdd", "ssim", "psnr"]:
+        if k in stats:
+            print(f"  {k.upper():6s}: {stats[k]:.4f}")
+
+    if "throughput_img_per_sec" in stats:
+        print(f"\nThroughput: {stats['throughput_img_per_sec']:.1f} img/s")
+
+    # Save results locally if requested
+    if args.output_json:
+        import json
+        with open(args.output_json, "w") as f:
+            json.dump(stats, f, indent=2)
+        print(f"\nResults saved to: {args.output_json}")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Evaluate ViTok VAE")
-    group = parser.add_mutually_exclusive_group(required=True)
+
+    # Modal flag
+    parser.add_argument("--modal", action="store_true", help="Run on Modal cloud GPU")
+    parser.add_argument("--dataset", choices=["coco-val", "imagenet-val", "div8k"],
+                        help="Dataset preset (for --modal, provides data path)")
+
+    # Model selection (mutually exclusive unless using --modal with checkpoint on volume)
+    group = parser.add_mutually_exclusive_group()
     group.add_argument("--checkpoint", help="Path to checkpoint file")
     group.add_argument("--model", help="Pretrained model name (e.g., L-64)")
     parser.add_argument("--variant", default=None, help="Model variant (required if using --checkpoint)")
-    parser.add_argument("--data", required=True, help="Path to evaluation data")
+    parser.add_argument("--data", help="Path to evaluation data")
     parser.add_argument("--max-size", type=int, default=256, help="Max image size")
     parser.add_argument("--batch-size", type=int, default=64, help="Batch size per GPU")
     parser.add_argument("--num-samples", type=int, default=5000, help="Number of samples")
@@ -448,12 +589,24 @@ def main():
     parser.add_argument("--swa-window", type=int, default=None, help="Sliding window attention radius")
     parser.add_argument("--metrics", nargs="+", default=["fid", "fdd", "ssim", "psnr"], help="Metrics to compute")
     parser.add_argument("--no-compile", action="store_true", help="Disable torch.compile")
-    parser.add_argument("--float8", action="store_true", help="Enable FP8/INT8 quantization (FP8 on H100+, INT8 on A100)")
+    parser.add_argument("--float8", choices=["inference", "training"], default=None,
+                        help="Float8 mode: 'inference' (quantization API) or 'training' (float8 training API)")
     parser.add_argument("--save-visuals", type=int, default=0, help="Number of sample images to save")
     parser.add_argument("--output-dir", default=None, help="Directory to save visuals")
     parser.add_argument("--output-json", default=None, help="Save results to JSON file")
     parser.add_argument("--output-csv", default=None, help="Save results to CSV file (one row per run)")
     args = parser.parse_args()
+
+    # Validate args
+    if not args.modal and not args.model and not args.checkpoint:
+        parser.error("Either --model or --checkpoint is required (unless using --modal)")
+    if not args.modal and not args.data:
+        parser.error("--data is required (unless using --modal with --dataset)")
+
+    # Run on Modal if requested
+    if args.modal:
+        _run_on_modal(args)
+        return
 
     # Setup distributed (for multi-GPU)
     rank, world_size, _, device, _ = setup_distributed()
@@ -471,7 +624,7 @@ def main():
             swa_window=args.swa_window,
             metrics=tuple(args.metrics),
             compile=not args.no_compile,
-            float8_mode="inference" if args.float8 else None,
+            float8_mode=args.float8,
             device=device,
             verbose=(rank == 0),
             save_visuals=args.save_visuals if rank == 0 else 0,
