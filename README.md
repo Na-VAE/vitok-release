@@ -144,95 +144,47 @@ vitok/
     └── registry.py      # DSL parser
 ```
 
-## Modal Quickstart (GPU Inference)
-
-Run inference on Modal's cloud GPUs without local GPU setup.
-
-### First-time Setup
-
-```bash
-# Install Modal CLI
-pip install modal
-
-# Authenticate (one-time)
-modal token new
-
-# Pre-build the inference environment (optional, speeds up first run)
-modal run scripts/modal/setup_env.py
-
-# Create volume for caching model weights
-modal run scripts/modal/setup_volume.py
-```
-
-### Run Inference
-
-```bash
-# Run with default model and astronaut test image
-modal run scripts/modal/inference.py
-
-# Specify model variant
-modal run scripts/modal/inference.py --model T-32x64
-
-# Use your own image
-modal run scripts/modal/inference.py --model L-16x64 --image path/to/image.jpg
-
-# Save output locally
-modal run scripts/modal/inference.py --output reconstructed.png
-
-# List available pretrained models
-modal run scripts/modal/inference.py --list-models
-```
-
-Available models: `L-64`, `L-32`, `L-16`, `T-64`, `T-128`, `T-256`
-
 ## Evaluation
 
 Evaluate pretrained models on standard benchmarks using reconstruction metrics (FID, SSIM, PSNR).
 
-### Install Evaluation Datasets
+### Modal Evaluation (Recommended)
+
+Run evaluation on Modal's cloud GPUs - no local GPU needed.
 
 ```bash
-# Download COCO val2017 (~1GB, 5000 images)
-./scripts/install_eval_datasets.sh
+# First-time setup
+pip install modal
+modal token new
+modal secret create huggingface-secret HF_TOKEN=<your-hf-token>
+
+# Run evaluation with --modal flag
+python scripts/eval_vae.py --modal --model L-64 --num-samples 5000
+
+# With dataset preset
+python scripts/eval_vae.py --modal --model L-64 --dataset coco-val
+
+# Different models
+python scripts/eval_vae.py --modal --model L-16
+python scripts/eval_vae.py --modal --model L-32
 ```
 
 ### Local Evaluation
 
 ```bash
-# Evaluate a checkpoint on local data
-python scripts/eval_vae.py \
-    --checkpoint path/to/model.safetensors \
-    --variant Ld4-Ld24/1x16x64 \
-    --data ./data/coco/val2017 \
-    --num-samples 5000 \
-    --metrics fid ssim psnr
+# Download COCO val2017 (~1GB, 5000 images)
+./scripts/install_eval_datasets.sh
 
-# With HuggingFace pretrained weights (uses --model for automatic download)
+# Evaluate with HuggingFace pretrained weights
 python scripts/eval_vae.py \
     --model L-64 \
     --data ./data/coco/val2017
-```
 
-### Modal Evaluation (Recommended)
-
-Run evaluation on Modal's cloud GPUs without local GPU setup.
-
-```bash
-# Quick test (100 samples)
-modal run scripts/modal/eval_vae.py --model L-64 --num-samples 100
-
-# Full evaluation (1000 samples, default)
-modal run scripts/modal/eval_vae.py --model L-64
-
-# Complete benchmark (5000 samples)
-modal run scripts/modal/eval_vae.py --model L-64 --num-samples 5000
-
-# Evaluate different models
-modal run scripts/modal/eval_vae.py --model L-16
-modal run scripts/modal/eval_vae.py --model L-32
-
-# List available models
-modal run scripts/modal/eval_vae.py --list-models
+# Evaluate a checkpoint
+python scripts/eval_vae.py \
+    --checkpoint path/to/model.safetensors \
+    --variant Ld4-Ld24/1x16x64 \
+    --data ./data/coco/val2017
 ```
 
 ### Metrics
