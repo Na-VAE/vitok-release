@@ -53,9 +53,12 @@ from PIL import Image
 import torch
 
 # Load pretrained AE
-weights_path = download_pretrained("L-64")
+weights_paths = download_pretrained("L-64")  # returns list of paths
+weights = {}
+for path in weights_paths:
+    weights.update(load_file(path))
 model = AE(**decode_variant("Ld4-Ld24/1x16x64"))
-model.load_state_dict(load_file(weights_path))
+model.load_state_dict(weights)
 model.to(device="cuda", dtype=torch.bfloat16)
 model.eval()
 
@@ -204,10 +207,9 @@ python scripts/eval_vae.py \
     --num-samples 5000 \
     --metrics fid ssim psnr
 
-# With HuggingFace pretrained weights
+# With HuggingFace pretrained weights (uses --model for automatic download)
 python scripts/eval_vae.py \
-    --checkpoint $(python -c "from vitok import download_pretrained; print(download_pretrained('L-64'))") \
-    --variant Ld4-Ld24/1x16x64 \
+    --model L-64 \
     --data ./data/coco/val2017
 ```
 

@@ -57,8 +57,7 @@ def run_vitok_reconstruction():
     # Download L-64 model
     print("\nDownloading L-64 model...")
     _, _, variant = get_pretrained_info("L-64")
-    result = download_pretrained("L-64")
-    weights_paths = result if isinstance(result, list) else [result]
+    weights_paths = download_pretrained("L-64")
     config = decode_variant(variant)
     patch_size = config["spatial_stride"]
     print(f"Variant: {variant}, patch_size: {patch_size}")
