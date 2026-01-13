@@ -95,6 +95,7 @@ def main():
 
     # Distributed
     parser.add_argument("--fsdp", action="store_true", help="Use FSDP2 instead of DDP")
+    parser.add_argument("--modal", action="store_true", help="Run on Modal cloud GPU (8x A100)")
 
     # Logging
     parser.add_argument("--output_dir", type=str, default="checkpoints/vae")
@@ -113,6 +114,45 @@ def main():
     parser.add_argument("--no_compile", action="store_true", help="Disable torch.compile")
 
     args = parser.parse_args()
+
+    # Run on Modal if requested
+    if args.modal:
+        from scripts.modal.modal_config import multi_gpu_modal
+
+        # Capture all args for the remote function
+        train_args = vars(args).copy()
+        train_args.pop('modal')  # Don't pass modal flag to remote
+
+        @multi_gpu_modal("vitok-train", gpu="A100:8", timeout=86400)
+        def run():
+            import subprocess
+            import sys
+
+            # Build command line for torchrun
+            cmd = [
+                sys.executable, "-m", "torch.distributed.run",
+                "--nproc_per_node=8",
+                "scripts/train_vae.py",
+                "--fsdp",  # Always use FSDP for multi-GPU
+            ]
+
+            # Add all other arguments
+            for key, value in train_args.items():
+                if value is None or value is False:
+                    continue
+                if key == 'fsdp':  # Already added
+                    continue
+                arg_name = f"--{key.replace('_', '-')}" if '_' in key else f"--{key}"
+                if value is True:
+                    cmd.append(arg_name)
+                else:
+                    cmd.extend([arg_name, str(value)])
+
+            print(f"Running: {' '.join(cmd)}")
+            subprocess.run(cmd, check=True)
+
+        run()
+        return
 
     # Validate pretrained/checkpoint args
     if args.pretrained and args.checkpoint:

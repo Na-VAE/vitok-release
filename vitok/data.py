@@ -1,5 +1,10 @@
 """Data loading with preprocessing DSL.
 
+Supports three data source types:
+- ImageFolder: directory of images (jpg, png, etc.)
+- WebDataset: tar shards (local or hf:// URLs)
+- VideoFolder: TODO - directory of video files or frame sequences
+
 Example:
     # WebDataset (tar shards) - auto-detected
     loader = create_dataloader(
@@ -14,12 +19,19 @@ Example:
         pp="resize_longest_side(512)|to_tensor|normalize(minus_one_to_one)|patchify(16, 256)",
         batch_size=32,
     )
+
+Note on drop_last behavior:
+- ImageFolder: respects drop_last parameter
+- WebDataset: always drops incomplete batches (partial=False is hardcoded)
+  The drop_last parameter is ignored for WebDataset sources.
 """
 
 from __future__ import annotations
 
 import random
 import re
+import warnings
+from enum import Enum
 from pathlib import Path
 from typing import Callable, List, Optional
 
@@ -29,6 +41,13 @@ import webdataset as wds
 from PIL import Image, ImageOps
 
 from vitok.pp import build_transform
+
+
+class DataSourceType(Enum):
+    """Data source types supported by create_dataloader."""
+    IMAGE_FOLDER = "image_folder"
+    WEBDATASET = "webdataset"
+    VIDEO_FOLDER = "video_folder"  # TODO: not yet implemented
 
 
 def patch_collate_fn(batch):
@@ -140,7 +159,7 @@ def create_dataloader(
     seed: int = 0,
     shuffle_buffer: int = 10000,
     min_size: Optional[int] = None,
-    drop_last: bool = False,
+    drop_last: bool = True,
 ):
     """Create a dataloader from source with preprocessing.
 

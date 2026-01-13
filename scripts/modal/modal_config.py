@@ -156,68 +156,55 @@ DATASET_PATHS = {
 # Helper: Run function on Modal
 # =============================================================================
 
-def run_on_modal(
-    fn_path: str,
-    config: dict,
-    kwargs: dict,
+def multi_gpu_modal(
     app_name: str = "vitok",
-    scripts: list[str] = None,
+    gpu: str = "H100",
+    timeout: int = 3600,
+    volumes: dict = None,
+    secrets: list = None,
+    image: modal.Image = None,
 ):
-    """Run a function on Modal with the given config.
+    """Factory to create Modal-wrapped functions for multi-GPU execution.
 
-    This creates a Modal app, wraps the function, and runs it remotely.
+    Usage:
+        @multi_gpu_modal("vitok-eval", gpu="H100", timeout=3600)
+        def run():
+            return evaluate(**kwargs)
+        stats = run()
 
     Args:
-        fn_path: Import path to function (e.g., "scripts.eval_vae:evaluate")
-        config: Config dict (e.g., EVAL_CONFIG)
-        kwargs: Keyword arguments to pass to the function
         app_name: Name for the Modal app
-        scripts: Scripts to include (auto-detected from fn_path if not provided)
+        gpu: GPU spec (e.g., "H100", "A100:8")
+        timeout: Function timeout in seconds
+        volumes: Volume mappings (default: weights + data volumes)
+        secrets: Secrets list (default: HF secret)
+        image: Modal image (default: eval_image with vitok code)
 
     Returns:
-        Result from the remote function
-
-    Example:
-        result = run_on_modal(
-            fn_path="scripts.eval_vae:evaluate",
-            config=EVAL_CONFIG,
-            kwargs={"model_name": "L-64", "data": "/data/coco/val2017", ...}
-        )
+        Decorator that wraps function for Modal execution
     """
-    import os
+    def decorator(fn):
+        # Build image
+        _image = image if image is not None else with_vitok_code(eval_image)
 
-    # Auto-detect script from fn_path
-    if scripts is None:
-        module_path = fn_path.split(":")[0]
-        script_file = module_path.replace(".", "/") + ".py"
-        scripts = [script_file]
+        # Default volumes/secrets
+        _volumes = volumes if volumes is not None else {"/cache": weights_vol, "/data": data_vol}
+        _secrets = secrets if secrets is not None else [hf_secret]
 
-    # Build image with code
-    image = with_vitok_code(eval_image, scripts)
+        # Create app
+        app = modal.App(app_name)
 
-    # Create app
-    app = modal.App(app_name)
+        @app.function(image=_image, gpu=gpu, timeout=timeout, volumes=_volumes, secrets=_secrets)
+        def _remote():
+            import sys
+            import os as _os
 
-    # Store kwargs in closure - Modal will serialize these
-    _kwargs = kwargs
-    _fn_path = fn_path
+            sys.path.insert(0, "/root/vitok-release")
+            _os.environ["HF_HOME"] = "/cache/huggingface"
+            return fn()
 
-    @app.function(image=image, **config)
-    def _remote_runner():
-        import sys
-        import os as _os
+        # Run and return result
+        with app.run():
+            return _remote.remote()
 
-        # Setup environment
-        sys.path.insert(0, "/root/vitok-release")
-        _os.environ["HF_HOME"] = "/cache/huggingface"
-
-        # Import and call the function
-        module_path, fn_name = _fn_path.rsplit(":", 1)
-        module = __import__(module_path, fromlist=[fn_name])
-        fn = getattr(module, fn_name)
-
-        return fn(**_kwargs)
-
-    # Run
-    with app.run():
-        return _remote_runner.remote()
+    return decorator
