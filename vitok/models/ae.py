@@ -116,6 +116,7 @@ class Block(nn.Module):
             h,
             freqs_cis=freqs_cis,
             score_mod=score_mod,
+            sliding_window=self.sliding_window,
             block_mask=block_mask,
         )
         mlp_out = self.ffn(h)

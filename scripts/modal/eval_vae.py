@@ -40,6 +40,8 @@ DATASET_PATHS = {
     "coco-val": "/data/coco/val2017",
     "imagenet-val": "/data/imagenet/val",
     "div8k": "/data/div8k/val",
+    "hires-4k": "/data/hires_4096",
+    "hires-5k": "/data/hires_4096",  # Alias (images are 5K)
 }
 
 eval_image = (
@@ -94,6 +96,8 @@ def run_eval(
         "coco-val": "/data/coco/val2017",
         "imagenet-val": "/data/imagenet/val",
         "div8k": "/data/div8k/val",
+        "hires-4k": "/data/hires_4096",
+        "hires-5k": "/data/hires_4096",
     }
 
     from scripts.eval_vae import evaluate
