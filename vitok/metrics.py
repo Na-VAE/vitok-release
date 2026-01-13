@@ -12,24 +12,12 @@ import torchvision.transforms.functional as TF
 from torchvision.transforms import InterpolationMode
 from typing import List, Tuple, Optional
 from scipy import linalg
-
-# FID Inception
 from pytorch_fid.inception import InceptionV3 as PytorchFIDInceptionV3
-
-# DINO for FDD
 from dino_perceptual import DINOModel
-
-# Torchmetrics for SSIM/PSNR
-try:
-    from torchmetrics.image import (
-        peak_signal_noise_ratio as PSNR,
-        structural_similarity_index_measure as SSIM,
-    )
-except ImportError:
-    from torchmetrics.functional import (
-        peak_signal_noise_ratio as PSNR,
-        structural_similarity_index_measure as SSIM,
-    )
+from torchmetrics.functional import (
+    peak_signal_noise_ratio as PSNR,
+    structural_similarity_index_measure as SSIM,
+)
 
 
 def calculate_frechet_distance(mu1, sigma1, mu2, sigma2, eps=1e-6):

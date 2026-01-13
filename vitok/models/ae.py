@@ -189,6 +189,7 @@ class AE(nn.Module):
 
         self.num_special_tokens = (1 if class_token else 0) + reg_tokens
         self._block_mask = None
+        self._quantization_applied = False
 
         # Initialize encoder components
         if encoder:
@@ -215,8 +216,6 @@ class AE(nn.Module):
                     drop_path=0.0,
                     sliding_window=sliding_window,
                 )
-                if self.float8_mode:
-                    _apply_float8(block, self.float8_mode)
                 blocks.append(block)
             self.encoder_blocks = nn.ModuleList(blocks)
 
@@ -248,8 +247,6 @@ class AE(nn.Module):
                     drop_path=decoder_dpr[layer_idx],
                     sliding_window=sliding_window,
                 )
-                if self.float8_mode:
-                    _apply_float8(block, self.float8_mode)
                 blocks.append(block)
             self.decoder_blocks = nn.ModuleList(blocks)
 
@@ -263,6 +260,22 @@ class AE(nn.Module):
 
     def _should_checkpoint(self, layer_idx: int) -> bool:
         return self.checkpoint > 0 and self.training and (layer_idx % self.checkpoint == 0)
+
+    def load_state_dict(self, state_dict, strict=True, assign=False):
+        """Load state dict and auto-apply float8 quantization if configured."""
+        result = super().load_state_dict(state_dict, strict=strict, assign=assign)
+
+        # Apply quantization after loading weights (only once)
+        if self.float8_mode and not self._quantization_applied:
+            if self.encoder:
+                for block in self.encoder_blocks:
+                    _apply_float8(block, self.float8_mode)
+            if self.decoder:
+                for block in self.decoder_blocks:
+                    _apply_float8(block, self.float8_mode)
+            self._quantization_applied = True
+
+        return result
 
     def _get_rope_freqs(
         self,

@@ -60,7 +60,7 @@ def postprocess(
     """Postprocess model output into images.
 
     Args:
-        output: Image tensor (B,C,H,W) or patch dict with 'patches' or 'images'
+        output: patch dict with 'patches' or 'images'
         output_format: Target format ("minus_one_to_one", "zero_to_one", "0_255")
         current_format: Current format of the output
         do_unpack: Whether to crop to original sizes (requires dict input)
@@ -70,19 +70,9 @@ def postprocess(
     Returns:
         Images tensor or list of tensors (if do_unpack=True)
     """
-    if isinstance(output, dict):
-        if 'images' in output:
-            images = output['images']
-        elif 'patches' in output:
-            images = unpatchify(output, patch=patch, max_grid_size=max_grid_size)
-        else:
-            raise KeyError("Expected 'images' or 'patches' in output dict")
-    else:
-        images = output
-
+    images = unpatchify(output, patch=patch, max_grid_size=max_grid_size)
     images = _convert_format(images, current_format, output_format)
-
-    if do_unpack and isinstance(output, dict):
+    if do_unpack:
         orig_h = output.get('orig_height')
         orig_w = output.get('orig_width')
         if orig_h is None or orig_w is None:
