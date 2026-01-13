@@ -87,22 +87,32 @@ def test_float8_inference(
     cc = torch.cuda.get_device_capability()
     quant_type = "FP8" if cc[0] >= 9 else "INT8"
 
+    # Get GPU info
+    gpu_name = torch.cuda.get_device_name(device)
+    total_memory_gb = torch.cuda.get_device_properties(device).total_memory / (1024**3)
+
     print(f"Testing quantized inference for: {model_name}")
+    print(f"  GPU: {gpu_name} ({total_memory_gb:.1f} GB)")
     print(f"  GPU Compute Capability: {cc[0]}.{cc[1]}")
     print(f"  Quantization Type: {quant_type} (auto-selected based on GPU)")
     print(f"  Samples: {n_samples}")
     print(f"  Image size: {image_size}")
     print()
 
+    # Reset memory stats
+    torch.cuda.reset_peak_memory_stats(device)
+
     # Download model
     _, _, variant = get_pretrained_info(model_name)
-    checkpoint = download_pretrained(model_name)
-    print(f"  Checkpoint: {checkpoint}")
+    weights_paths = download_pretrained(model_name)
+    print(f"  Weights: {weights_paths}")
     print(f"  Variant: {variant}")
 
-    # Load weights
+    # Load weights (merge if split files)
     from safetensors.torch import load_file
-    weights = load_file(checkpoint)
+    weights = {}
+    for path in weights_paths:
+        weights.update(load_file(path))
 
     # Get model config
     config = decode_variant(variant)
@@ -164,11 +174,36 @@ def test_float8_inference(
     bf16_has_nan = torch.isnan(bf16_outputs).any().item() or torch.isinf(bf16_outputs).any().item()
     bf16_latency = np.mean(bf16_times[1:])  # Skip first (warmup)
 
+    # Memory stats for bf16
+    bf16_peak_memory_gb = torch.cuda.max_memory_allocated(device) / (1024**3)
+
     print(f"  BF16 has NaN/Inf: {bf16_has_nan}")
     print(f"  BF16 latency: {bf16_latency:.2f}ms")
+    print(f"  BF16 peak memory: {bf16_peak_memory_gb:.2f} GB")
+
+    # Estimate FLOPs for bf16 model
+    bf16_encoder_flops = 0
+    bf16_decoder_flops = 0
+    try:
+        from torch.utils.flop_counter import FlopCounterMode
+        with FlopCounterMode(display=False) as fc:
+            with torch.no_grad():
+                _ = encoder_bf16.encode(patch_dict)
+        bf16_encoder_flops = fc.get_total_flops()
+
+        with FlopCounterMode(display=False) as fc:
+            with torch.no_grad():
+                _ = decoder_bf16.decode(encoded)
+        bf16_decoder_flops = fc.get_total_flops()
+
+        print(f"  BF16 encoder FLOPs: {bf16_encoder_flops/1e9:.2f} GFLOPs")
+        print(f"  BF16 decoder FLOPs: {bf16_decoder_flops/1e9:.2f} GFLOPs")
+    except Exception as e:
+        print(f"  FLOPs estimation failed: {e}")
 
     del encoder_bf16, decoder_bf16
     torch.cuda.empty_cache()
+    torch.cuda.reset_peak_memory_stats(device)  # Reset for INT8 test
 
     # Test 2: INT8 inference mode (applied AFTER loading weights)
     print("\n[2/3] Testing INT8 inference mode...")
@@ -225,8 +260,12 @@ def test_float8_inference(
         float8_has_nan = torch.isnan(f8_outputs).any().item() or torch.isinf(f8_outputs).any().item()
         float8_latency = np.mean(f8_times[1:])
 
+        # Memory stats for INT8
+        float8_peak_memory_gb = torch.cuda.max_memory_allocated(device) / (1024**3)
+
         print(f"  Float8 has NaN/Inf: {float8_has_nan}")
         print(f"  Float8 latency: {float8_latency:.2f}ms")
+        print(f"  Float8 peak memory: {float8_peak_memory_gb:.2f} GB")
 
         float8_works = True
 
@@ -235,6 +274,7 @@ def test_float8_inference(
         float8_works = False
         float8_has_nan = True
         float8_latency = 0
+        float8_peak_memory_gb = 0
         f8_outputs = bf16_outputs  # Use bf16 for comparison
 
     # Test 3: Compare outputs
@@ -264,6 +304,8 @@ def test_float8_inference(
             "model": model_name,
             "n_samples": n_samples,
             "image_size": image_size,
+            "gpu": gpu_name,
+            "quant_type": quant_type,
             "bf16_has_nan": bf16_has_nan,
             "float8_has_nan": float8_has_nan,
             "float8_works": float8_works,
@@ -272,17 +314,30 @@ def test_float8_inference(
             "bf16_latency_ms": bf16_latency,
             "float8_latency_ms": float8_latency,
             "speedup": speedup,
+            # Memory stats
+            "bf16_peak_memory_gb": bf16_peak_memory_gb,
+            "float8_peak_memory_gb": float8_peak_memory_gb,
+            "memory_reduction_pct": (1 - float8_peak_memory_gb / bf16_peak_memory_gb) * 100 if bf16_peak_memory_gb > 0 else 0,
+            # FLOPs stats
+            "encoder_gflops": bf16_encoder_flops / 1e9 if bf16_encoder_flops > 0 else None,
+            "decoder_gflops": bf16_decoder_flops / 1e9 if bf16_decoder_flops > 0 else None,
+            "total_gflops": (bf16_encoder_flops + bf16_decoder_flops) / 1e9 if bf16_encoder_flops > 0 else None,
         }
     else:
         results = {
             "model": model_name,
             "n_samples": n_samples,
             "image_size": image_size,
+            "gpu": gpu_name,
+            "quant_type": quant_type,
             "bf16_has_nan": bf16_has_nan,
             "float8_has_nan": True,
             "float8_works": False,
             "error": "Float8 mode failed to initialize or run",
             "bf16_latency_ms": bf16_latency,
+            "bf16_peak_memory_gb": bf16_peak_memory_gb,
+            "encoder_gflops": bf16_encoder_flops / 1e9 if bf16_encoder_flops > 0 else None,
+            "decoder_gflops": bf16_decoder_flops / 1e9 if bf16_decoder_flops > 0 else None,
         }
 
     # Summary
@@ -304,7 +359,21 @@ def test_float8_inference(
         else:
             print("PASS: No NaN/Inf in float8 output")
 
-        print(f"Speedup: {results['speedup']:.2f}x")
+        print(f"\nPerformance:")
+        print(f"  Speedup: {results['speedup']:.2f}x ({quant_type} vs BF16)")
+        print(f"  BF16 latency: {results['bf16_latency_ms']:.2f}ms")
+        print(f"  {quant_type} latency: {results['float8_latency_ms']:.2f}ms")
+
+        print(f"\nMemory:")
+        print(f"  BF16 peak: {results['bf16_peak_memory_gb']:.2f} GB")
+        print(f"  {quant_type} peak: {results['float8_peak_memory_gb']:.2f} GB")
+        print(f"  Reduction: {results['memory_reduction_pct']:.1f}%")
+
+        if results.get("total_gflops"):
+            print(f"\nFLOPs (per image):")
+            print(f"  Encoder: {results['encoder_gflops']:.2f} GFLOPs")
+            print(f"  Decoder: {results['decoder_gflops']:.2f} GFLOPs")
+            print(f"  Total: {results['total_gflops']:.2f} GFLOPs")
     else:
         print("FAIL: Float8 mode did not work")
         passed = False

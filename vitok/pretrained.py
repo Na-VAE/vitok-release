@@ -1,84 +1,54 @@
-"""Pretrained model registry and download utilities."""
+"""Pretrained model registry and loading utilities."""
 
-from typing import Tuple
 from huggingface_hub import hf_hub_download
 
-# Registry of pretrained models: name -> (repo_id, filename, variant)
-PRETRAINED_MODELS = {
-    # Large models (1.1B decoder)
-    "Ld4-Ld24/1x16x64": ("philippehansen/ViTok-L-16x64", "model.safetensors", "Ld4-Ld24/1x16x64"),
-    "Ld4-Ld24/1x16x32": ("philippehansen/ViTok-L-16x32", "model.safetensors", "Ld4-Ld24/1x16x32"),
-
-    # Tiny models (for testing)
-    "Td2-Td12/1x16x64": ("Na-VAE/ViTok-T-64", "model.safetensors", "Td2-Td12/1x16x64"),
-    "Td2-Td12/1x16x128": ("Na-VAE/ViTok-T-128", "model.safetensors", "Td2-Td12/1x16x128"),
-    "Td2-Td12/1x16x256": ("Na-VAE/ViTok-T-256", "model.safetensors", "Td2-Td12/1x16x256"),
-    "Td2-Td12/1x32x64": ("philippehansen/ViTok-T-32x64", "model.safetensors", "Td2-Td12/1x32x64"),
-}
-
-# Short aliases for convenience
-PRETRAINED_ALIASES = {
-    "L-64": "Ld4-Ld24/1x16x64",
-    "L-16x64": "Ld4-Ld24/1x16x64",
-    "L-32": "Ld4-Ld24/1x16x32",
-    "L-16x32": "Ld4-Ld24/1x16x32",
-    "T-64": "Td2-Td12/1x16x64",
-    "T-128": "Td2-Td12/1x16x128",
-    "T-256": "Td2-Td12/1x16x256",
-    "T-32x64": "Td2-Td12/1x32x64",
+# Registry: name -> (repo_id, filenames, variant)
+# Format: {size}-f{spatial}x{channels}
+_MODELS = {
+    # 350M models (51M encoder + 303M decoder), patch size 16
+    "350M-f16x16": ("philippehansen/ViTok-v2-350M-f16x16", ["encoder.safetensors", "decoder.safetensors"], "Ld4-Ld24/1x16x16"),
+    "350M-f16x32": ("philippehansen/ViTok-v2-350M-f16x32", ["encoder.safetensors", "decoder.safetensors"], "Ld4-Ld24/1x16x32"),
+    "350M-f16x64": ("philippehansen/ViTok-v2-350M-f16x64", ["encoder.safetensors", "decoder.safetensors"], "Ld4-Ld24/1x16x64"),
+    # 5B models (463M encoder + 4.5B decoder), patch size 32
+    "5B-f32x64": ("philippehansen/ViTok-v2-5B-f32x64", ["encoder.safetensors", "decoder.safetensors"], "Td4-T/1x32x64"),
+    "5B-f32x128": ("philippehansen/ViTok-v2-5B-f32x128", ["encoder.safetensors", "decoder.safetensors"], "Td4-T/1x32x128"),
+    "5B-f32x256": ("philippehansen/ViTok-v2-5B-f32x256", ["encoder.safetensors", "decoder.safetensors"], "Td4-T/1x32x256"),
 }
 
 
-def resolve_model_name(name: str) -> str:
-    """Resolve alias to full model name."""
-    return PRETRAINED_ALIASES.get(name, name)
-
-
-def get_pretrained_info(name: str) -> Tuple[str, str, str]:
-    """Get pretrained model info.
+def load_pretrained(name: str, component: str | None = None, cache_dir: str | None = None) -> dict:
+    """Load pretrained weights from HuggingFace Hub.
 
     Args:
-        name: Model name or alias (e.g., "L-64" or "Ld4-Ld24/1x16x64")
-
-    Returns:
-        Tuple of (repo_id, filename, variant)
-
-    Raises:
-        KeyError: If model not found
-    """
-    full_name = resolve_model_name(name)
-    if full_name not in PRETRAINED_MODELS:
-        available = list(PRETRAINED_ALIASES.keys()) + list(PRETRAINED_MODELS.keys())
-        raise KeyError(f"Unknown model: {name}. Available: {available}")
-    return PRETRAINED_MODELS[full_name]
-
-
-def download_pretrained(name: str, cache_dir: str | None = None) -> str:
-    """Download pretrained weights from HuggingFace Hub.
-
-    Args:
-        name: Model name or alias
+        name: Model name (e.g., "350M-f16x64", "5B-f32x128")
+        component: 'encoder', 'decoder', or None for both
         cache_dir: Optional cache directory (uses HF_HOME by default)
 
     Returns:
-        Path to downloaded weights file
+        dict with 'variant' and 'encoder'/'decoder' keys
     """
-    repo_id, filename, _ = get_pretrained_info(name)
-    return hf_hub_download(repo_id=repo_id, filename=filename, cache_dir=cache_dir)
+    if name not in _MODELS:
+        raise KeyError(f"Unknown model: {name}. Available: {list(_MODELS.keys())}")
+
+    repo_id, filenames, variant = _MODELS[name]
+    result = {'variant': variant}
+
+    from safetensors.torch import load_file
+
+    if component != 'decoder':
+        path = hf_hub_download(repo_id=repo_id, filename=filenames[0], cache_dir=cache_dir)
+        result['encoder'] = load_file(path)
+
+    if component != 'encoder':
+        path = hf_hub_download(repo_id=repo_id, filename=filenames[1], cache_dir=cache_dir)
+        result['decoder'] = load_file(path)
+
+    return result
 
 
 def list_pretrained() -> list[str]:
     """List all available pretrained models."""
-    return list(PRETRAINED_ALIASES.keys()) + [
-        k for k in PRETRAINED_MODELS.keys() if k not in PRETRAINED_ALIASES.values()
-    ]
+    return list(_MODELS.keys())
 
 
-__all__ = [
-    "PRETRAINED_MODELS",
-    "PRETRAINED_ALIASES",
-    "get_pretrained_info",
-    "download_pretrained",
-    "list_pretrained",
-    "resolve_model_name",
-]
+__all__ = ["load_pretrained", "list_pretrained"]

@@ -66,6 +66,10 @@ def main():
                         help="AE variant (e.g., B/1x16x64, Ld2-Ld22/1x16x64)")
     parser.add_argument("--checkpoint", type=str, default=None,
                         help="Resume from checkpoint")
+    parser.add_argument("--pretrained", type=str, default=None,
+                        help="Pretrained model name (e.g., 'L-64') or path for finetuning. Mutually exclusive with --checkpoint.")
+    parser.add_argument("--freeze_encoder", action="store_true",
+                        help="Freeze encoder for decoder-only finetuning. Requires --pretrained.")
 
     # Training
     parser.add_argument("--steps", type=int, default=100000)
@@ -91,6 +95,7 @@ def main():
 
     # Distributed
     parser.add_argument("--fsdp", action="store_true", help="Use FSDP2 instead of DDP")
+    parser.add_argument("--modal", action="store_true", help="Run on Modal cloud GPU (8x A100)")
 
     # Logging
     parser.add_argument("--output_dir", type=str, default="checkpoints/vae")
@@ -109,6 +114,62 @@ def main():
     parser.add_argument("--no_compile", action="store_true", help="Disable torch.compile")
 
     args = parser.parse_args()
+
+    # Run on Modal if requested
+    if args.modal:
+        from scripts.modal.modal_config import multi_gpu_modal
+
+        # Capture all args for the remote function
+        train_args = vars(args).copy()
+        train_args.pop('modal')  # Don't pass modal flag to remote
+
+        @multi_gpu_modal("vitok-train", gpu="A100:8", timeout=86400)
+        def run():
+            import subprocess
+            import sys
+
+            # Build command line for torchrun
+            cmd = [
+                sys.executable, "-m", "torch.distributed.run",
+                "--nproc_per_node=8",
+                "scripts/train_vae.py",
+                "--fsdp",  # Always use FSDP for multi-GPU
+            ]
+
+            # Add all other arguments
+            for key, value in train_args.items():
+                if value is None or value is False:
+                    continue
+                if key == 'fsdp':  # Already added
+                    continue
+                arg_name = f"--{key.replace('_', '-')}" if '_' in key else f"--{key}"
+                if value is True:
+                    cmd.append(arg_name)
+                else:
+                    cmd.extend([arg_name, str(value)])
+
+            print(f"Running: {' '.join(cmd)}")
+            subprocess.run(cmd, check=True)
+
+        run()
+        return
+
+    # Validate pretrained/checkpoint args
+    if args.pretrained and args.checkpoint:
+        raise ValueError("--pretrained and --checkpoint are mutually exclusive. Use --pretrained for finetuning, --checkpoint for resuming.")
+    if args.freeze_encoder and not args.pretrained:
+        raise ValueError("--freeze_encoder requires --pretrained to be specified.")
+
+    # Auto-infer variant from pretrained model if using pretrained
+    if args.pretrained:
+        from vitok.pretrained import get_pretrained_info
+        try:
+            _, _, variant = get_pretrained_info(args.pretrained)
+            args.variant = variant
+            print(f"Auto-inferred variant '{variant}' from pretrained model '{args.pretrained}'")
+        except KeyError:
+            # If not a known pretrained model (e.g., local file), keep user-specified variant
+            pass
 
     # Handle compile flag (--compile is default True, --no_compile disables it)
     use_compile = args.compile and not args.no_compile
@@ -133,6 +194,11 @@ def main():
         print(f"Creating AE model: {args.variant}")
     model = AE(**decode_variant(args.variant))
     model.to(device=device, dtype=dtype)
+
+    # Load pretrained weights for finetuning (must be before compile/FSDP)
+    if args.pretrained:
+        from vitok.utils import load_pretrained_weights
+        model = load_pretrained_weights(model, args.pretrained, device, dtype, rank, args.freeze_encoder)
 
     # Compile if requested (before FSDP/DDP wrapping)
     if use_compile:
@@ -266,16 +332,20 @@ def main():
     log_metrics = {}
     log_count = 0
     t_log_start = time.perf_counter()
+    data_load_times = []
 
     max_grid_size = args.max_size // args.patch_size
     pbar = tqdm(total=args.steps, initial=start_step, disable=rank != 0, desc="Training")
 
     while step < args.steps:
+        data_start = time.perf_counter()
         try:
             batch = next(loader_iter)
         except StopIteration:
             loader_iter = iter(loader)
             batch = next(loader_iter)
+        data_load_time = time.perf_counter() - data_start
+        data_load_times.append(data_load_time)
         batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
         if 'patches' in batch:
             batch['patches'] = batch['patches'].to(dtype)
@@ -368,6 +438,13 @@ def main():
             avg['timing/samples_per_sec'] = (args.batch_size * log_count * world_size) / elapsed
             avg['timing/step_time'] = elapsed / log_count
 
+            # Data loading stats
+            recent_data_times = data_load_times[-args.log_freq:]
+            if recent_data_times:
+                avg_data_load_time = sum(recent_data_times) / len(recent_data_times)
+                avg['timing/data_load_ms'] = avg_data_load_time * 1000
+                avg['timing/data_throughput'] = args.batch_size / avg_data_load_time
+
             # GPU memory stats
             if torch.cuda.is_available():
                 mem_allocated = torch.cuda.max_memory_allocated() / 1e9  # GB
@@ -386,12 +463,13 @@ def main():
             if rank == 0:
                 mem_str = f" | mem: {mem_allocated:.1f}GB" if torch.cuda.is_available() else ""
                 mfu_str = f" | H200 MFU: {avg.get('timing/mfu_percent', 0):.1f}%" if 'timing/mfu_percent' in avg else ""
+                data_str = f" | data: {avg.get('timing/data_load_ms', 0):.1f}ms ({avg.get('timing/data_throughput', 0):.0f} imgs/s)" if 'timing/data_load_ms' in avg else ""
                 print(f"Step {step}/{args.steps} | "
                       f"loss: {avg['loss/total']:.4f} | "
                       f"charb: {avg['loss/charb']:.4f} | "
                       f"ssim: {avg['loss/ssim']:.4f} | "
                       f"dino: {avg['loss/dino']:.4f} | "
-                      f"lr: {lr:.2e}{mem_str}{mfu_str}")
+                      f"lr: {lr:.2e}{mem_str}{mfu_str}{data_str}")
 
             if wandb_enabled:
                 wandb.log(avg, step=step)
@@ -399,6 +477,7 @@ def main():
             log_metrics = {}
             log_count = 0
             t_log_start = time.perf_counter()
+            data_load_times = []  # Clear to prevent unbounded memory growth
 
         # Evaluation
         if args.eval_freq > 0 and step % args.eval_freq == 0:

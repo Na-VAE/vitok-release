@@ -89,132 +89,44 @@ def setup_distributed(seed: int = 42) -> Tuple[int, int, int, torch.device, Opti
     return rank, world_size, local_rank, device, device_mesh
 
 
-def cleanup_distributed():
-    """Cleanup distributed training environment."""
-    if dist.is_initialized():
-        dist.destroy_process_group()
-
-
 def save_checkpoint(
     train_state: Dict[str, Any],
     checkpoint_root: str,
-    step: int,
-    rank: int,
-    world_size: int,
-    save_safetensors: bool = True,
+    model: Optional[nn.Module] = None,
 ):
     """Save training checkpoint using DCP.
 
     Args:
         train_state: Dict containing 'app' (ModelOptimizerState), 'step', 'scheduler', etc.
         checkpoint_root: Root directory for checkpoints
-        step: Current training step
-        rank: Process rank
-        world_size: World size
-        save_safetensors: Also export model weights as safetensors
+        model: Optional model to also save as safetensors (gathered to rank 0)
     """
-    train_state['step'] = step
     last_path = os.path.join(checkpoint_root, "last")
     os.makedirs(last_path, exist_ok=True)
-
-    if dist.is_initialized():
-        dist.barrier()
-
     dcp.save(state_dict=train_state, checkpoint_id=last_path)
+    if model is not None:
+        export_safetensors(model, last_path)
 
-    if dist.is_initialized():
-        dist.barrier()
-
-    if save_safetensors:
-        _save_safetensors(train_state, last_path, rank)
-
-    if dist.is_initialized():
-        dist.barrier()
-
-
-def save_marked_checkpoint(
-    train_state: Dict[str, Any],
-    checkpoint_root: str,
-    step: int,
-    rank: int,
-):
-    """Save a marked checkpoint at a specific step (for periodic saves)."""
-    marked_path = os.path.join(checkpoint_root, "marked", f"{step:07d}")
-    os.makedirs(marked_path, exist_ok=True)
-
-    if dist.is_initialized():
-        dist.barrier()
-
-    _save_safetensors(train_state, marked_path, rank)
-
-    if dist.is_initialized():
-        dist.barrier()
-
-
-def load_checkpoint(train_state: Dict[str, Any], checkpoint_path: str, rank: int = 0) -> int:
+def load_checkpoint(train_state: Dict[str, Any], checkpoint_path: str) -> int:
     """Load training checkpoint using DCP. Returns step number."""
-    ckpt_dir = _find_checkpoint_dir(checkpoint_path)
-    if rank == 0:
-        print(f"Loading checkpoint from: {ckpt_dir}")
-
-    dcp.load(state_dict=train_state, checkpoint_id=ckpt_dir)
-
-    if rank == 0:
-        print("Checkpoint loaded successfully.")
-
+    dcp.load(state_dict=train_state, checkpoint_id=checkpoint_path)
     return train_state.get('step', 0)
 
 
-def _find_checkpoint_dir(path: str) -> str:
-    """Find the actual checkpoint directory."""
-    path = os.path.abspath(os.path.expanduser(path))
-
-    if os.path.exists(os.path.join(path, ".metadata")):
-        return path
-
-    last_path = os.path.join(path, "last")
-    if os.path.exists(os.path.join(last_path, ".metadata")):
-        return last_path
-
-    marked_root = os.path.join(path, "marked")
-    if os.path.isdir(marked_root):
-        dirs = sorted([d for d in os.listdir(marked_root) if d.isdigit()], reverse=True)
-        for d in dirs:
-            p = os.path.join(marked_root, d)
-            if os.path.exists(os.path.join(p, ".metadata")) or os.path.exists(os.path.join(p, "model.safetensors")):
-                return p
-
-    raise FileNotFoundError(f"No valid checkpoint found at {path}")
-
-
-def _save_safetensors(train_state: Dict[str, Any], save_dir: str, rank: int):
-    """Save model weights as safetensors (gathered to rank 0)."""
-    if 'app' not in train_state:
-        return
-
-    model = train_state['app'].model
-    if hasattr(model, 'module'):
-        model = model.module
-
+def export_safetensors(model: nn.Module, save_dir: str):
+    """Export model weights as safetensors (gathered to rank 0)."""
+    import itertools
     state_dict = {}
+    rank = dist.get_rank() if dist.is_initialized() else 0
+
     with torch.no_grad():
-        for name, param in model.named_parameters():
+        for name, param in itertools.chain(model.named_parameters(), model.named_buffers()):
             if isinstance(param, DTensor):
-                t = param.full_tensor()
-                if rank == 0:
-                    state_dict[name] = t.cpu()
-            elif rank == 0:
+                param = param.full_tensor()
+            if rank == 0:
                 state_dict[name] = param.detach().cpu()
 
-        for name, buffer in model.named_buffers():
-            if isinstance(buffer, DTensor):
-                t = buffer.full_tensor()
-                if rank == 0:
-                    state_dict[name] = t.cpu()
-            elif rank == 0:
-                state_dict[name] = buffer.detach().cpu()
-
-    if rank == 0 and state_dict:
+    if rank == 0:
         save_file(state_dict, os.path.join(save_dir, 'model.safetensors'))
 
 
@@ -274,160 +186,78 @@ def clip_grad_norm_(parameters, max_norm: float, use_fsdp: bool = False, world_s
         return torch.nn.utils.clip_grad_norm_(params, max_norm, foreach=True)
 
 
-class CosineScheduler(Stateful):
+class BaseScheduler(Stateful):
+    """Base LR scheduler with warmup."""
+
+    def __init__(self, optimizer, warmup_steps: int, max_lr: float, start_lr: float = 1e-7):
+        self.optimizer = optimizer
+        self.warmup_steps = warmup_steps
+        self.max_lr = max_lr
+        self.start_lr = start_lr
+        self.current_step = 0
+
+    def step(self) -> float:
+        self.current_step += 1
+        lr = self.get_lr()
+        for pg in self.optimizer.param_groups:
+            pg['lr'] = lr
+        return lr
+
+    def get_lr(self) -> float:
+        raise NotImplementedError
+
+    def set_step(self, step: int):
+        self.current_step = step
+
+    def state_dict(self) -> Dict[str, Any]:
+        return {k: v for k, v in self.__dict__.items() if k != 'optimizer'}
+
+    def load_state_dict(self, state_dict: Dict[str, Any]):
+        for k, v in state_dict.items():
+            if hasattr(self, k):
+                setattr(self, k, v)
+
+
+class CosineScheduler(BaseScheduler):
     """Cosine annealing LR scheduler with linear warmup."""
 
     def __init__(self, optimizer, warmup_steps: int, total_steps: int,
                  max_lr: float, min_lr: float = 1e-6, start_lr: float = 1e-7):
-        self.optimizer = optimizer
-        self.warmup_steps = warmup_steps
+        super().__init__(optimizer, warmup_steps, max_lr, start_lr)
         self.total_steps = total_steps
-        self.max_lr = max_lr
         self.min_lr = min_lr
-        self.start_lr = start_lr
-        self.current_step = 0
-
-    def step(self) -> float:
-        """Step the scheduler and return current LR."""
-        self.current_step += 1
-        lr = self.get_lr()
-        for pg in self.optimizer.param_groups:
-            pg['lr'] = lr
-        return lr
 
     def get_lr(self) -> float:
-        step = self.current_step
-        if step <= self.warmup_steps:
-            # Linear warmup
-            lr = self.start_lr + (self.max_lr - self.start_lr) * (step / max(1, self.warmup_steps))
-        else:
-            # Cosine decay
-            progress = (step - self.warmup_steps) / max(1, self.total_steps - self.warmup_steps)
-            lr = self.min_lr + (self.max_lr - self.min_lr) * 0.5 * (1 + np.cos(np.pi * progress))
-        return lr
-
-    def set_step(self, step: int):
-        self.current_step = step
-
-    def state_dict(self) -> Dict[str, Any]:
-        return {
-            'current_step': self.current_step,
-            'warmup_steps': self.warmup_steps,
-            'total_steps': self.total_steps,
-            'max_lr': self.max_lr,
-            'min_lr': self.min_lr,
-            'start_lr': self.start_lr,
-        }
-
-    def load_state_dict(self, state_dict: Dict[str, Any]):
-        self.current_step = state_dict.get('current_step', 0)
-        self.warmup_steps = state_dict.get('warmup_steps', self.warmup_steps)
-        self.total_steps = state_dict.get('total_steps', self.total_steps)
-        self.max_lr = state_dict.get('max_lr', self.max_lr)
-        self.min_lr = state_dict.get('min_lr', self.min_lr)
-        self.start_lr = state_dict.get('start_lr', self.start_lr)
+        if self.current_step <= self.warmup_steps:
+            return self.start_lr + (self.max_lr - self.start_lr) * (self.current_step / max(1, self.warmup_steps))
+        progress = (self.current_step - self.warmup_steps) / max(1, self.total_steps - self.warmup_steps)
+        return self.min_lr + (self.max_lr - self.min_lr) * 0.5 * (1 + np.cos(np.pi * progress))
 
 
-class LinearScheduler(Stateful):
+class LinearScheduler(BaseScheduler):
     """Linear warmup followed by constant LR."""
 
-    def __init__(self, optimizer, warmup_steps: int,
-                 max_lr: float, start_lr: float = 1e-7):
-        self.optimizer = optimizer
-        self.warmup_steps = warmup_steps
-        self.max_lr = max_lr
-        self.start_lr = start_lr
-        self.current_step = 0
-
-    def step(self) -> float:
-        self.current_step += 1
-        lr = self.get_lr()
-        for pg in self.optimizer.param_groups:
-            pg['lr'] = lr
-        return lr
-
     def get_lr(self) -> float:
-        step = self.current_step
-        if step <= self.warmup_steps:
-            lr = self.start_lr + (self.max_lr - self.start_lr) * (step / max(1, self.warmup_steps))
-        else:
-            lr = self.max_lr
-        return lr
-
-    def set_step(self, step: int):
-        self.current_step = step
-
-    def state_dict(self) -> Dict[str, Any]:
-        return {
-            'current_step': self.current_step,
-            'warmup_steps': self.warmup_steps,
-            'max_lr': self.max_lr,
-            'start_lr': self.start_lr,
-        }
-
-    def load_state_dict(self, state_dict: Dict[str, Any]):
-        self.current_step = state_dict.get('current_step', 0)
-        self.warmup_steps = state_dict.get('warmup_steps', self.warmup_steps)
-        self.max_lr = state_dict.get('max_lr', self.max_lr)
-        self.start_lr = state_dict.get('start_lr', self.start_lr)
+        if self.current_step <= self.warmup_steps:
+            return self.start_lr + (self.max_lr - self.start_lr) * (self.current_step / max(1, self.warmup_steps))
+        return self.max_lr
 
 
-class ExponentialDecayScheduler(Stateful):
+class ExponentialDecayScheduler(BaseScheduler):
     """Linear warmup followed by exponential decay."""
 
     def __init__(self, optimizer, warmup_steps: int, total_steps: int,
                  max_lr: float, final_lr: float = 1e-6, start_lr: float = 1e-7):
-        self.optimizer = optimizer
-        self.warmup_steps = warmup_steps
+        super().__init__(optimizer, warmup_steps, max_lr, start_lr)
         self.total_steps = total_steps
-        self.max_lr = max_lr
         self.final_lr = final_lr
-        self.start_lr = start_lr
-        self.current_step = 0
-
-        # Compute decay rate
-        decay_steps = max(1, total_steps - warmup_steps)
-        self.decay_rate = (final_lr / max_lr) ** (1.0 / decay_steps)
-
-    def step(self) -> float:
-        self.current_step += 1
-        lr = self.get_lr()
-        for pg in self.optimizer.param_groups:
-            pg['lr'] = lr
-        return lr
+        self.decay_rate = (final_lr / max_lr) ** (1.0 / max(1, total_steps - warmup_steps))
 
     def get_lr(self) -> float:
-        step = self.current_step
-        if step <= self.warmup_steps:
-            lr = self.start_lr + (self.max_lr - self.start_lr) * (step / max(1, self.warmup_steps))
-        else:
-            decay_step = step - self.warmup_steps
-            lr = self.max_lr * (self.decay_rate ** decay_step)
-            lr = max(lr, self.final_lr)
-        return lr
-
-    def set_step(self, step: int):
-        self.current_step = step
-
-    def state_dict(self) -> Dict[str, Any]:
-        return {
-            'current_step': self.current_step,
-            'warmup_steps': self.warmup_steps,
-            'total_steps': self.total_steps,
-            'max_lr': self.max_lr,
-            'final_lr': self.final_lr,
-            'start_lr': self.start_lr,
-            'decay_rate': self.decay_rate,
-        }
-
-    def load_state_dict(self, state_dict: Dict[str, Any]):
-        self.current_step = state_dict.get('current_step', 0)
-        self.warmup_steps = state_dict.get('warmup_steps', self.warmup_steps)
-        self.total_steps = state_dict.get('total_steps', self.total_steps)
-        self.max_lr = state_dict.get('max_lr', self.max_lr)
-        self.final_lr = state_dict.get('final_lr', self.final_lr)
-        self.start_lr = state_dict.get('start_lr', self.start_lr)
-        self.decay_rate = state_dict.get('decay_rate', self.decay_rate)
+        if self.current_step <= self.warmup_steps:
+            return self.start_lr + (self.max_lr - self.start_lr) * (self.current_step / max(1, self.warmup_steps))
+        decay_step = self.current_step - self.warmup_steps
+        return max(self.max_lr * (self.decay_rate ** decay_step), self.final_lr)
 
 
 def create_scheduler(

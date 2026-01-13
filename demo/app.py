@@ -41,8 +41,10 @@ def load_model(model_name: str):
 
     # Get model info and download weights
     _, _, variant = get_pretrained_info(model_name)
-    weights_path = download_pretrained(model_name)
-    weights = load_file(weights_path)
+    weights_paths = download_pretrained(model_name)
+    weights = {}
+    for path in weights_paths:
+        weights.update(load_file(path))
 
     # Create full model (encoder + decoder)
     model = AE(**decode_variant(variant))
