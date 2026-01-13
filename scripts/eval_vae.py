@@ -204,6 +204,13 @@ def evaluate(
         weights.update(load_file(path))
 
     config = decode_variant(variant)
+
+    # Add SWA window to config if specified (must be set at init time)
+    if swa_window is not None:
+        config["sw"] = swa_window
+        if verbose:
+            print(f"  SWA window: {swa_window}")
+
     # Create models WITHOUT float8_mode - we apply quantization AFTER loading weights
     encoder = AE(**config, decoder=False, float8_mode=None).to(device=device, dtype=dtype)
     encoder.load_state_dict(weights, strict=False)
@@ -222,11 +229,6 @@ def evaluate(
             _apply_float8(block, float8_mode)
         for block in decoder.decoder_blocks:
             _apply_float8(block, float8_mode)
-
-    # Set SWA window if specified (override the model's default)
-    if swa_window is not None:
-        encoder.sw = swa_window
-        decoder.sw = swa_window
 
     patch_size = encoder.spatial_stride
     max_tokens = (max_size // patch_size) ** 2

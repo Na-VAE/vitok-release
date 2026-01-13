@@ -151,9 +151,13 @@ def download_imagenet1k_val(force: bool = False) -> dict:
     return {"status": "downloaded", "images": n_images, "path": str(imagenet_dir)}
 
 
-@app.function(image=image, volumes={"/data": vol}, timeout=7200)
+@app.function(image=image, volumes={"/data": vol}, secrets=[modal.Secret.from_name("huggingface-secret")], timeout=7200)
 def download_div8k(force: bool = False) -> dict:
-    """Download DIV8K validation set for high-resolution evaluation."""
+    """Download DIV2K validation set for high-resolution evaluation.
+
+    Note: DIV8K is no longer easily available, so we use DIV2K which has
+    images up to 2K resolution - still much larger than COCO/ImageNet.
+    """
     import os
     from pathlib import Path
 
@@ -163,32 +167,34 @@ def download_div8k(force: bool = False) -> dict:
     if not force and div8k_dir.exists():
         n_images = len(list(div8k_dir.glob("*.png"))) + len(list(div8k_dir.glob("*.jpg")))
         if n_images >= 100:
-            print(f"DIV8K val already cached: {n_images} images")
+            print(f"DIV2K val already cached: {n_images} images")
             return {"status": "cached", "images": n_images, "path": str(div8k_dir)}
 
-    print("Downloading DIV8K validation set...")
+    print("Downloading DIV2K validation set (high-res images up to 2K)...")
     div8k_dir.mkdir(parents=True, exist_ok=True)
 
-    # DIV8K is available on HuggingFace
-    from huggingface_hub import hf_hub_download, list_repo_files
+    # Download DIV2K validation from official source
+    import urllib.request
+    import zipfile
 
-    repo_id = "eugenesiow/Div8K"
+    url = "http://data.vision.ee.ethz.ch/cvl/DIV2K/DIV2K_valid_HR.zip"
+    zip_path = div8k_dir.parent / "DIV2K_valid_HR.zip"
 
-    files = list_repo_files(repo_id, repo_type="dataset")
-    val_files = [f for f in files if "val" in f.lower() and (f.endswith(".png") or f.endswith(".jpg"))]
+    print(f"Downloading from {url}...")
+    urllib.request.urlretrieve(url, zip_path)
 
-    if not val_files:
-        # Try HR folder
-        val_files = [f for f in files if "HR" in f and (f.endswith(".png") or f.endswith(".jpg"))][:200]
+    print("Extracting...")
+    with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+        zip_ref.extractall(div8k_dir.parent)
 
-    print(f"Found {len(val_files)} validation images")
+    # Move files from DIV2K_valid_HR to div8k/val
+    extracted_dir = div8k_dir.parent / "DIV2K_valid_HR"
+    if extracted_dir.exists():
+        for f in extracted_dir.glob("*.png"):
+            os.rename(f, div8k_dir / f.name)
+        extracted_dir.rmdir()
 
-    for i, f in enumerate(val_files):
-        if i % 50 == 0:
-            print(f"Downloading {i}/{len(val_files)}...")
-        local_path = hf_hub_download(repo_id=repo_id, filename=f, repo_type="dataset")
-        target = div8k_dir / Path(f).name
-        os.system(f"cp '{local_path}' '{target}'")
+    os.remove(zip_path)
 
     n_images = len(list(div8k_dir.glob("*.png"))) + len(list(div8k_dir.glob("*.jpg")))
     print(f"Downloaded {n_images} images to {div8k_dir}")
