@@ -2,22 +2,21 @@
 """Evaluate ViTok VAE reconstruction quality.
 
 Usage:
-    # Local evaluation with checkpoint path
-    python scripts/eval_vae.py --checkpoint model.safetensors --data /path/to/images
+    # Local evaluation
+    python scripts/eval_vae.py --model 350M-f16x64 --data /path/to/images
+    python scripts/eval_vae.py --model 350M-f16x64 --data ./coco/val2017 --max-size 512
 
-    # With pretrained model name (downloads from HuggingFace)
-    python scripts/eval_vae.py --model L-64 --data /path/to/images
+    # Modal cloud GPU (recommended - no local GPU needed!)
+    modal run scripts/eval_vae.py --model 350M-f16x64 --dataset coco-val
+    modal run scripts/eval_vae.py --model 5B-f16x64 --dataset div8k --max-size 1024
 
-    # Full options
-    python scripts/eval_vae.py --model L-64 --data ./data/coco/val2017 --max-size 512 --num-samples 5000
-
-    # Run on Modal cloud GPU (recommended - no local GPU needed!)
-    python scripts/eval_vae.py --modal --model L-64 --num-samples 5000
-
-    # Modal with dataset preset (coco-val, imagenet-val, div8k)
-    python scripts/eval_vae.py --modal --model L-64 --dataset coco-val
+    # Modal with all options
+    modal run scripts/eval_vae.py --model 350M-f16x64 --dataset coco-val \\
+        --max-size 256 --crop-style adm_square --num-samples 5000 \\
+        --output-json results/eval.json
 """
 import argparse
+import json
 import time
 from pathlib import Path
 import torch
@@ -25,6 +24,7 @@ import torchvision.transforms.functional as TF
 from tqdm import tqdm
 
 import torch.distributed as dist
+import modal
 
 from vitok import AE, decode_variant
 from safetensors.torch import load_file
@@ -34,6 +34,7 @@ from vitok.pp.io import postprocess
 from vitok.metrics import MetricCalculator
 from vitok.pretrained import load_pretrained
 from torch.utils.flop_counter import FlopCounterMode
+from scripts.modal.modal_config import image, gpu, DATASET_PATHS
 
 
 def measure_flops(encoder, decoder, batch, device, dtype):
@@ -211,11 +212,11 @@ def evaluate(
 
     # Create models (float8 auto-applied on load_state_dict)
     encoder = AE(**config, decoder=False, float8_mode=float8_mode).to(device=device, dtype=dtype)
-    encoder.load_state_dict(encoder_weights, strict=False)
+    encoder.load_state_dict(encoder_weights)
     encoder.eval()
 
     decoder = AE(**config, encoder=False, float8_mode=float8_mode).to(device=device, dtype=dtype)
-    decoder.load_state_dict(decoder_weights, strict=False)
+    decoder.load_state_dict(decoder_weights)
     decoder.eval()
 
     patch_size = encoder.spatial_stride
@@ -294,11 +295,11 @@ def evaluate(
         metric_calc.update(ref, recon)
         samples_seen += len(batch["patches"])
 
-        # Collect samples for visualization (convert to [0, 1] for saving)
-        if save_visuals > 0 and len(visual_originals) < save_visuals:
-            for i in range(min(len(ref), save_visuals - len(visual_originals))):
-                visual_originals.append(((ref[i] + 1.0) / 2.0).clamp(0, 1).cpu())
-                visual_recons.append(((recon[i] + 1.0) / 2.0).clamp(0, 1).cpu())
+    # Collect samples for visualization (convert to [0, 1] for saving)
+    if save_visuals > 0 and len(visual_originals) < save_visuals:
+        for i in range(min(len(ref), save_visuals - len(visual_originals))):
+            visual_originals.append(((ref[i] + 1.0) / 2.0).clamp(0, 1).cpu())
+            visual_recons.append(((recon[i] + 1.0) / 2.0).clamp(0, 1).cpu())
 
     eval_end_time = time.perf_counter()
     total_eval_time = eval_end_time - eval_start_time
@@ -350,20 +351,31 @@ def evaluate(
 
     return stats
 
+
+def _print_results(result: dict, model: str, max_size: int, crop_style: str, output_json: str = None):
+    """Print evaluation results and optionally save to JSON."""
+    print(f"\n{'='*60}")
+    print(f"Model: {model} @ {max_size}px ({crop_style})")
+    print(f"{'='*60}")
+    for k, v in result.items():
+        if isinstance(v, float):
+            print(f"  {k}: {v:.4f}")
+        else:
+            print(f"  {k}: {v}")
+    if output_json:
+        with open(output_json, "w") as f:
+            json.dump(result, f, indent=2)
+        print(f"\nSaved to: {output_json}")
+
+
 def main():
+    """Local execution: python scripts/eval_vae.py --model X --data /path/to/images"""
     parser = argparse.ArgumentParser(description="Evaluate ViTok VAE")
-
-    # Modal flag
-    parser.add_argument("--modal", action="store_true", help="Run on Modal cloud GPU")
-    parser.add_argument("--dataset", choices=["coco-val", "imagenet-val", "div8k"],
-                        help="Dataset preset (for --modal, provides data path)")
-
-    # Model selection (mutually exclusive unless using --modal with checkpoint on volume)
-    group = parser.add_mutually_exclusive_group()
+    group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--checkpoint", help="Path to checkpoint file")
-    group.add_argument("--model", help="Pretrained model name (e.g., L-64)")
+    group.add_argument("--model", help="Pretrained model name (e.g., 350M-f16x64)")
     parser.add_argument("--variant", default=None, help="Model variant (required if using --checkpoint)")
-    parser.add_argument("--data", help="Path to evaluation data")
+    parser.add_argument("--data", required=True, help="Path to evaluation data")
     parser.add_argument("--max-size", type=int, default=256, help="Max image size")
     parser.add_argument("--batch-size", type=int, default=64, help="Batch size per GPU")
     parser.add_argument("--num-samples", type=int, default=5000, help="Number of samples")
@@ -371,58 +383,12 @@ def main():
     parser.add_argument("--swa-window", type=int, default=None, help="Sliding window attention radius")
     parser.add_argument("--metrics", nargs="+", default=["fid", "fdd", "ssim", "psnr"], help="Metrics to compute")
     parser.add_argument("--no-compile", action="store_true", help="Disable torch.compile")
-    parser.add_argument("--float8", choices=["inference", "training"], default=None,
-                        help="Float8 mode: 'inference' (quantization API) or 'training' (float8 training API)")
+    parser.add_argument("--float8", choices=["inference", "training"], default=None)
     parser.add_argument("--save-visuals", type=int, default=0, help="Number of sample images to save")
     parser.add_argument("--output-dir", default=None, help="Directory to save visuals")
     parser.add_argument("--output-json", default=None, help="Save results to JSON file")
-    parser.add_argument("--output-csv", default=None, help="Save results to CSV file (one row per run)")
     args = parser.parse_args()
 
-    # Validate args
-    if not args.modal and not args.model and not args.checkpoint:
-        parser.error("Either --model or --checkpoint is required (unless using --modal)")
-    if not args.modal and not args.data:
-        parser.error("--data is required (unless using --modal with --dataset)")
-
-    # Run on Modal if requested
-    if args.modal:
-        from scripts.modal.modal_config import multi_gpu_modal, DATASET_PATHS
-
-        data_path = DATASET_PATHS.get(args.dataset, args.data) if args.dataset else args.data
-        if not data_path:
-            data_path = DATASET_PATHS["coco-val"]
-
-        eval_kwargs = {
-            "model_name": args.model,
-            "checkpoint": args.checkpoint,
-            "variant": args.variant,
-            "data": data_path,
-            "max_size": args.max_size,
-            "batch_size": args.batch_size,
-            "num_samples": args.num_samples,
-            "crop_style": args.crop_style,
-            "swa_window": args.swa_window,
-            "metrics": tuple(args.metrics),
-            "compile": not args.no_compile,
-            "float8_mode": args.float8,
-            "save_visuals": args.save_visuals,
-            "output_dir": "/tmp/eval_output" if args.save_visuals > 0 else None,
-        }
-
-        @multi_gpu_modal("vitok-eval", gpu="H100", timeout=3600)
-        def run():
-            return evaluate(**eval_kwargs)
-
-        stats = run()
-        if args.output_json:
-            import json
-            with open(args.output_json, "w") as f:
-                json.dump(stats, f, indent=2)
-            print(f"\nResults saved to: {args.output_json}")
-        return
-
-    # Setup distributed (for multi-GPU)
     rank, world_size, _, device, _ = setup_distributed()
     stats = evaluate(
         checkpoint=args.checkpoint,
@@ -443,12 +409,82 @@ def main():
         output_dir=args.output_dir,
     )
 
-    # Save results to JSON (only rank 0)
-    if rank == 0 and args.output_json:
-        import json
-        with open(args.output_json, "w") as f:
-            json.dump(stats, f, indent=2)
-        print(f"\nResults saved to: {args.output_json}")
+    if rank == 0:
+        _print_results(stats, args.model or args.checkpoint, args.max_size, args.crop_style, args.output_json)
+
+
+# =============================================================================
+# Modal support: modal run scripts/eval_vae.py --model X --dataset coco-val
+# =============================================================================
+app = modal.App("vitok-eval")
+
+
+@app.function(image=image, **gpu("H100"))
+def run_eval_remote(
+    model: str,
+    dataset: str,
+    max_size: int = 256,
+    crop_style: str = "native",
+    num_samples: int = 5000,
+    batch_size: int = 64,
+    swa_window: int | None = None,
+    metrics: list[str] | None = None,
+    no_compile: bool = False,
+    float8: str | None = None,
+    save_visuals: int = 0,
+) -> dict:
+    """Run evaluation on Modal cloud GPU."""
+    import torch
+    from scripts.eval_vae import evaluate
+
+    return evaluate(
+        model_name=model,
+        data=DATASET_PATHS[dataset],
+        max_size=max_size,
+        crop_style=crop_style,
+        num_samples=num_samples,
+        batch_size=batch_size,
+        swa_window=swa_window,
+        metrics=tuple(metrics or ["fid", "fdd", "ssim", "psnr"]),
+        compile=not no_compile,
+        float8_mode=float8,
+        save_visuals=save_visuals,
+        output_dir="/tmp/eval_output" if save_visuals > 0 else None,
+        dtype=torch.bfloat16,
+    )
+
+
+@app.local_entrypoint()
+def modal_main(
+    model: str,
+    dataset: str = "coco-val",
+    max_size: int = 256,
+    crop_style: str = "native",
+    num_samples: int = 5000,
+    batch_size: int = 64,
+    swa_window: int = None,
+    metrics: str = "fid,fdd,ssim,psnr",
+    no_compile: bool = False,
+    float8: str = None,
+    save_visuals: int = 0,
+    output_json: str = None,
+):
+    """Modal entrypoint: modal run scripts/eval_vae.py --model X --dataset coco-val"""
+    result = run_eval_remote.remote(
+        model=model,
+        dataset=dataset,
+        max_size=max_size,
+        crop_style=crop_style,
+        num_samples=num_samples,
+        batch_size=batch_size,
+        swa_window=swa_window,
+        metrics=metrics.split(","),
+        no_compile=no_compile,
+        float8=float8,
+        save_visuals=save_visuals,
+    )
+    _print_results(result, model, max_size, crop_style, output_json)
+
 
 if __name__ == "__main__":
     main()
