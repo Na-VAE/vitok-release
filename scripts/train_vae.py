@@ -4,21 +4,23 @@
 Supports FSDP2/DDP distributed training with perceptual losses.
 
 Usage:
-    # Single GPU training
-    python scripts/train_vae.py \
-        --data /path/to/shards/*.tar \
-        --output_dir checkpoints/vae
+    # Local single GPU
+    python scripts/train_vae.py --data /path/to/shards/*.tar --output_dir checkpoints/vae
 
-    # Multi-GPU with FSDP2
+    # Local multi-GPU with FSDP2
     torchrun --nproc_per_node=8 scripts/train_vae.py \
-        --data hf://ILSVRC/imagenet-1k/train/*.tar \
-        --fsdp \
-        --output_dir checkpoints/vae
+        --data hf://timm/imagenet-22k-wds/imagenet22k-train-{0000..0099}.tar --fsdp
 
-    # Multi-GPU with DDP
-    torchrun --nproc_per_node=4 scripts/train_vae.py \
-        --data hf://ILSVRC/imagenet-1k/train/*.tar \
-        --output_dir checkpoints/vae
+    # Modal cloud GPU (8x A100, recommended)
+    modal run scripts/train_vae.py --steps 100000 --wandb-project vitok
+
+    # Modal with custom data
+    modal run scripts/train_vae.py \
+        --data hf://ILSVRC/imagenet-1k/train-{00000..01023}.tar \
+        --variant Ld2-Ld22/1x16x64 --steps 50000
+
+    # Modal finetune from pretrained
+    modal run scripts/train_vae.py --pretrained 350M-f16x64 --freeze-encoder --steps 10000
 """
 
 import argparse
@@ -39,12 +41,11 @@ from vitok.pp.io import postprocess
 from vitok.pp import sample_tiles
 from vitok import utils as tu
 from vitok.metrics import MetricCalculator
+
+import modal
 from scripts.modal.modal_config import image, gpu
 
-# Perceptual losses
-from dino_perceptual import DINOPerceptual
-from torchmetrics.functional.image import structural_similarity_index_measure as SSIM
-
+# Perceptual losses (imported lazily in train() to avoid issues on Modal import)
 import wandb
 
 
@@ -96,7 +97,6 @@ def main():
 
     # Distributed
     parser.add_argument("--fsdp", action="store_true", help="Use FSDP2 instead of DDP")
-    parser.add_argument("--modal", action="store_true", help="Run on Modal cloud GPU (8x A100)")
 
     # Logging
     parser.add_argument("--output_dir", type=str, default="checkpoints/vae")
@@ -115,38 +115,14 @@ def main():
     parser.add_argument("--no_compile", action="store_true", help="Disable torch.compile")
 
     args = parser.parse_args()
+    train(args)
 
-    # Run on Modal if requested
-    if args.modal:
-        import modal
 
-        train_args = vars(args).copy()
-        train_args.pop('modal')
-        # Use /output volume for checkpoints on Modal
-        if train_args.get('output_dir') == 'checkpoints/vae':
-            train_args['output_dir'] = '/output/checkpoints'
-
-        app = modal.App("vitok-train")
-
-        @app.function(image=image, **gpu("A100:8", timeout=86400))
-        def run_training():
-            import subprocess
-            import sys
-            cmd = [
-                sys.executable, "-m", "torch.distributed.run",
-                "--nproc_per_node=8", "scripts/train_vae.py", "--fsdp",
-            ]
-            for key, value in train_args.items():
-                if value is None or value is False or key == 'fsdp':
-                    continue
-                arg_name = f"--{key.replace('_', '-')}" if '_' in key else f"--{key}"
-                cmd.append(arg_name) if value is True else cmd.extend([arg_name, str(value)])
-            print(f"Running: {' '.join(cmd)}")
-            subprocess.run(cmd, check=True)
-
-        with app.run():
-            run_training.remote()
-        return
+def train(args):
+    """Main training function."""
+    # Import perceptual losses here to avoid issues on Modal import
+    from dino_perceptual import DINOPerceptual
+    from torchmetrics.functional.image import structural_similarity_index_measure as SSIM
 
     # Validate pretrained/checkpoint args
     if args.pretrained and args.checkpoint:
@@ -547,6 +523,97 @@ def main():
 
     if dist.is_initialized():
         dist.destroy_process_group()
+
+
+# =============================================================================
+# Modal support: modal run scripts/train_vae.py --steps 100000
+# =============================================================================
+app = modal.App("vitok-train")
+
+
+@app.function(image=image, **gpu("A100:8", timeout=86400))
+def run_training_remote(
+    data: str = "hf://timm/imagenet-22k-wds/imagenet22k-train-{0000..1023}.tar",
+    variant: str = "Ld2-Ld22/1x16x64",
+    batch_size: int = 32,
+    steps: int = 100000,
+    lr: float = 3e-4,
+    pretrained: str = None,
+    freeze_encoder: bool = False,
+    wandb_project: str = None,
+    wandb_name: str = None,
+    output_dir: str = "/output/checkpoints",
+):
+    """Run distributed training on Modal (8x A100 with FSDP)."""
+    import subprocess
+    import sys
+
+    cmd = [
+        sys.executable, "-m", "torch.distributed.run",
+        "--nproc_per_node=8", "scripts/train_vae.py", "--fsdp",
+        "--data", data,
+        "--variant", variant,
+        "--batch-size", str(batch_size),
+        "--steps", str(steps),
+        "--lr", str(lr),
+        "--output-dir", output_dir,
+    ]
+
+    if pretrained:
+        cmd.extend(["--pretrained", pretrained])
+    if freeze_encoder:
+        cmd.append("--freeze-encoder")
+    if wandb_project:
+        cmd.extend(["--wandb-project", wandb_project])
+    if wandb_name:
+        cmd.extend(["--wandb-name", wandb_name])
+
+    print(f"Running: {' '.join(cmd)}")
+    subprocess.run(cmd, check=True)
+
+
+@app.local_entrypoint()
+def modal_main(
+    data: str = "hf://timm/imagenet-22k-wds/imagenet22k-train-{0000..1023}.tar",
+    variant: str = "Ld2-Ld22/1x16x64",
+    batch_size: int = 32,
+    steps: int = 100000,
+    lr: float = 3e-4,
+    pretrained: str = None,
+    freeze_encoder: bool = False,
+    wandb_project: str = None,
+    wandb_name: str = None,
+):
+    """Modal entrypoint for VAE training.
+
+    Examples:
+        # Default training (ImageNet-22k, 8x A100)
+        modal run scripts/train_vae.py --steps 100000 --wandb-project vitok
+
+        # Custom data
+        modal run scripts/train_vae.py --data hf://ILSVRC/imagenet-1k/train-{00000..01023}.tar
+
+        # Finetune from pretrained
+        modal run scripts/train_vae.py --pretrained 350M-f16x64 --freeze-encoder --steps 10000
+    """
+    print(f"Starting training on Modal (8x A100)...")
+    print(f"  Data: {data}")
+    print(f"  Variant: {variant}")
+    print(f"  Steps: {steps}")
+
+    run_training_remote.remote(
+        data=data,
+        variant=variant,
+        batch_size=batch_size,
+        steps=steps,
+        lr=lr,
+        pretrained=pretrained,
+        freeze_encoder=freeze_encoder,
+        wandb_project=wandb_project,
+        wandb_name=wandb_name,
+    )
+
+    print("Training complete! Checkpoints saved to Modal volume: vitok-output:/checkpoints")
 
 
 if __name__ == "__main__":
