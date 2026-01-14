@@ -302,54 +302,41 @@ def evaluate(
     # ==========================================================================
     # Main evaluation loop
     # ==========================================================================
+    grid_size = max_size // patch_size
+
     for batch in tqdm(loader, disable=not verbose):
         if samples_seen >= num_samples:
             break
 
         batch_start = time.perf_counter()
 
+        # Forward pass: get ref and recon in [-1, 1] range
         if is_baseline:
-            # Baseline: batch is {"image": tensor} with images in [0, 1]
-            if isinstance(batch, dict):
-                images = batch["image"].to(device, dtype=dtype)
-            else:
-                images = batch.to(device, dtype=dtype)
-
+            images = batch["image"].to(device, dtype=dtype) if isinstance(batch, dict) else batch.to(device, dtype=dtype)
             with torch.no_grad():
                 recon = vae.encode_decode(images)
-
-            # Metrics expect [-1, 1] range
-            ref = images * 2 - 1
-            recon_norm = recon * 2 - 1
-            metric_calc.update(ref, recon_norm)
-
-            # Collect visuals (keep in [0, 1] for saving)
-            if save_visuals > 0 and len(visual_originals) < save_visuals:
-                for i in range(min(len(images), save_visuals - len(visual_originals))):
-                    visual_originals.append(images[i].cpu())
-                    visual_recons.append(recon[i].cpu())
-
-            samples_seen += len(images)
+            ref = images * 2 - 1  # [0,1] -> [-1,1]
+            recon = recon * 2 - 1
+            batch_size_actual = len(images)
         else:
-            # ViTok with local data: batch is already patchified dict
             batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
-
             with torch.no_grad(), torch.autocast(device_type="cuda", dtype=dtype, enabled=device.type == "cuda"):
                 encoded = encoder.encode(batch)
                 output = decoder.decode(encoded)
-
-            grid_size = max_size // patch_size
             ref = postprocess(batch, do_unpack=True, patch=patch_size, max_grid_size=grid_size, output_format="minus_one_to_one")
             recon = postprocess(output, do_unpack=True, patch=patch_size, max_grid_size=grid_size, output_format="minus_one_to_one")
-            metric_calc.update(ref, recon)
+            batch_size_actual = len(batch["patches"])
 
-            # Collect visuals (convert from [-1, 1] to [0, 1] for saving)
-            if save_visuals > 0 and len(visual_originals) < save_visuals:
-                for i in range(min(len(ref), save_visuals - len(visual_originals))):
-                    visual_originals.append(((ref[i] + 1.0) / 2.0).clamp(0, 1).cpu())
-                    visual_recons.append(((recon[i] + 1.0) / 2.0).clamp(0, 1).cpu())
+        # Update metrics (expects [-1, 1] range)
+        metric_calc.update(ref, recon)
 
-            samples_seen += len(batch["patches"])
+        # Collect visuals (convert to [0, 1] for saving)
+        if save_visuals > 0 and len(visual_originals) < save_visuals:
+            for i in range(min(len(ref), save_visuals - len(visual_originals))):
+                visual_originals.append(((ref[i] + 1.0) / 2.0).clamp(0, 1).cpu())
+                visual_recons.append(((recon[i] + 1.0) / 2.0).clamp(0, 1).cpu())
+
+        samples_seen += batch_size_actual
 
         batch_time = time.perf_counter() - batch_start
         inference_times.append(batch_time)
