@@ -21,7 +21,7 @@ import modal
 from vitok import AE, decode_variant
 from safetensors.torch import load_file
 from vitok.utils import setup_distributed
-from vitok.data import create_dataloader, HF_DATASETS
+from vitok.data import create_dataloader
 from vitok.pp.io import postprocess
 from vitok.metrics import MetricCalculator
 from vitok.pretrained import load_pretrained
@@ -268,8 +268,7 @@ def evaluate(
     # ==========================================================================
     # Create dataloader
     # ==========================================================================
-    is_streaming = data in HF_DATASETS
-    if is_baseline or is_streaming:
+    if is_baseline:
         # Simple preprocessing (images in [0, 1])
         pp = f"resize_longest_side({max_size})|center_crop({max_size})|to_tensor"
         loader = create_dataloader(data, pp, batch_size=batch_size, num_samples=num_samples, drop_last=is_distributed)
@@ -286,7 +285,7 @@ def evaluate(
     metric_calc.move_model_to_device(device, dtype=dtype)
 
     # Measure FLOPs on first batch (ViTok only, outside main loop)
-    if not is_baseline and not is_streaming:
+    if not is_baseline:
         first_batch = next(iter(loader))
         first_batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in first_batch.items()}
         encoder_flops, decoder_flops = measure_flops(encoder, decoder, first_batch, device, dtype)
@@ -331,49 +330,6 @@ def evaluate(
                     visual_recons.append(recon[i].cpu())
 
             samples_seen += len(images)
-
-        elif is_streaming:
-            # ViTok with streaming: images in [0, 1], need to normalize and patchify
-            from vitok.pp.ops import patchify as make_patchify
-
-            if isinstance(batch, dict):
-                images = batch["image"].to(device, dtype=dtype)
-            else:
-                images = batch.to(device, dtype=dtype)
-
-            # Normalize to [-1, 1] and patchify each image
-            images_norm = images * 2 - 1  # [0,1] -> [-1,1]
-            patchify_fn = make_patchify(patch_size, max_tokens)
-
-            # Patchify each image and collate
-            patchified_list = [patchify_fn(img) for img in images_norm]
-            patchified = {
-                "patches": torch.stack([p["patches"] for p in patchified_list]).to(device),
-                "patch_sizes": torch.stack([torch.tensor([p["grid_rows"], p["grid_cols"]]) for p in patchified_list]).to(device),
-                "patch_mask": torch.stack([p["patch_mask"] for p in patchified_list]).to(device),
-                "row_idx": torch.stack([p["row_idx"] for p in patchified_list]).to(device),
-                "col_idx": torch.stack([p["col_idx"] for p in patchified_list]).to(device),
-                "orig_height": torch.stack([p["orig_height"] for p in patchified_list]).to(device),
-                "orig_width": torch.stack([p["orig_width"] for p in patchified_list]).to(device),
-            }
-
-            with torch.no_grad(), torch.autocast(device_type="cuda", dtype=dtype, enabled=device.type == "cuda"):
-                encoded = encoder.encode(patchified)
-                output = decoder.decode(encoded)
-
-            grid_size = max_size // patch_size
-            ref = postprocess(patchified, do_unpack=True, patch=patch_size, max_grid_size=grid_size, output_format="minus_one_to_one")
-            recon = postprocess(output, do_unpack=True, patch=patch_size, max_grid_size=grid_size, output_format="minus_one_to_one")
-            metric_calc.update(ref, recon)
-
-            # Collect visuals (convert from [-1, 1] to [0, 1] for saving)
-            if save_visuals > 0 and len(visual_originals) < save_visuals:
-                for i in range(min(len(ref), save_visuals - len(visual_originals))):
-                    visual_originals.append(((ref[i] + 1.0) / 2.0).clamp(0, 1).cpu())
-                    visual_recons.append(((recon[i] + 1.0) / 2.0).clamp(0, 1).cpu())
-
-            samples_seen += len(images)
-
         else:
             # ViTok with local data: batch is already patchified dict
             batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
