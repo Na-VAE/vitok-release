@@ -1,32 +1,11 @@
 #!/usr/bin/env python
 """Evaluate ViTok VAE reconstruction quality.
 
-Usage:
-    # Local evaluation
-    python scripts/eval_vae.py --model 350M-f16x64 --data /path/to/images
-    python scripts/eval_vae.py --model 350M-f16x64 --data ./coco/val2017 --max-size 512
+See README.md for full usage examples.
 
-    # Modal with volume data (pre-downloaded datasets)
-    modal run scripts/eval_vae.py --model 350M-f16x64 --dataset coco-val
-    modal run scripts/eval_vae.py --model 5B-f16x64 --dataset div8k --max-size 1024
-
-    # Modal with HuggingFace streaming (no pre-download needed)
+Quick start:
     modal run scripts/eval_vae.py --model 350M-f16x64 --dataset coco --stream
-    modal run scripts/eval_vae.py --model 350M-f16x64 --dataset nature --stream --save-visuals 20
-
-    # Baseline VAEs (Flux, SD, Qwen)
     modal run scripts/eval_vae.py --baseline flux --dataset coco --stream
-    modal run scripts/eval_vae.py --baseline sd --dataset coco --stream --save-visuals 20
-
-    # Save visuals to Modal volume
-    modal run scripts/eval_vae.py --model 350M-f16x64 --dataset coco --stream \\
-        --save-visuals 20 --output-dir /output/blog/coco/350M-f16x64
-
-Available streaming datasets:
-    coco, div8k, nature, portraits, text, architecture, animals
-
-Available baselines:
-    flux, sd, qwen
 """
 import argparse
 import json
@@ -440,9 +419,12 @@ def evaluate(
             patchified_list = [patchify_fn(img) for img in images_norm]
             patchified = {
                 "patches": torch.stack([p["patches"] for p in patchified_list]).to(device),
-                "patch_sizes": torch.stack([p["patch_sizes"] for p in patchified_list]).to(device),
+                "patch_sizes": torch.stack([torch.tensor([p["grid_rows"], p["grid_cols"]]) for p in patchified_list]).to(device),
+                "patch_mask": torch.stack([p["patch_mask"] for p in patchified_list]).to(device),
                 "row_idx": torch.stack([p["row_idx"] for p in patchified_list]).to(device),
                 "col_idx": torch.stack([p["col_idx"] for p in patchified_list]).to(device),
+                "orig_height": torch.stack([p["orig_height"] for p in patchified_list]).to(device),
+                "orig_width": torch.stack([p["orig_width"] for p in patchified_list]).to(device),
             }
 
             with torch.no_grad(), torch.autocast(device_type="cuda", dtype=dtype, enabled=device.type == "cuda"):
@@ -681,21 +663,7 @@ def modal_main(
     output_dir: str = None,
     output_json: str = None,
 ):
-    """Modal entrypoint for VAE evaluation.
-
-    Examples:
-        # ViTok model with volume data
-        modal run scripts/eval_vae.py --model 350M-f16x64 --dataset coco-val
-
-        # ViTok model streaming from HuggingFace
-        modal run scripts/eval_vae.py --model 350M-f16x64 --dataset coco --stream
-
-        # Baseline VAE
-        modal run scripts/eval_vae.py --baseline flux --dataset coco --stream
-
-        # Save visuals
-        modal run scripts/eval_vae.py --model 350M-f16x64 --dataset coco --stream --save-visuals 20 --output-dir /output/blog/coco
-    """
+    """Modal entrypoint for VAE evaluation. See README.md for examples."""
     if model is None and baseline is None:
         raise ValueError("Either --model or --baseline must be provided")
 
