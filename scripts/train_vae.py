@@ -1,26 +1,11 @@
 #!/usr/bin/env python
-"""Train ViTok VAE (Autoencoder).
+"""Train ViTok VAE with FSDP2/DDP distributed training.
 
-Supports FSDP2/DDP distributed training with perceptual losses.
+See README.md for full usage examples.
 
-Usage:
-    # Local single GPU
-    python scripts/train_vae.py --data /path/to/shards/*.tar --output_dir checkpoints/vae
-
-    # Local multi-GPU with FSDP2
-    torchrun --nproc_per_node=8 scripts/train_vae.py \
-        --data hf://timm/imagenet-22k-wds/imagenet22k-train-{0000..0099}.tar --fsdp
-
-    # Modal cloud GPU (8x A100, recommended)
+Quick start:
     modal run scripts/train_vae.py --steps 100000 --wandb-project vitok
-
-    # Modal with custom data
-    modal run scripts/train_vae.py \
-        --data hf://ILSVRC/imagenet-1k/train-{00000..01023}.tar \
-        --variant Ld2-Ld22/1x16x64 --steps 50000
-
-    # Modal finetune from pretrained
-    modal run scripts/train_vae.py --pretrained 350M-f16x64 --freeze-encoder --steps 10000
+    torchrun --nproc_per_node=8 scripts/train_vae.py --fsdp --data /path/to/shards/*.tar
 """
 
 import argparse
@@ -584,18 +569,7 @@ def modal_main(
     wandb_project: str = None,
     wandb_name: str = None,
 ):
-    """Modal entrypoint for VAE training.
-
-    Examples:
-        # Default training (ImageNet-22k, 8x A100)
-        modal run scripts/train_vae.py --steps 100000 --wandb-project vitok
-
-        # Custom data
-        modal run scripts/train_vae.py --data hf://ILSVRC/imagenet-1k/train-{00000..01023}.tar
-
-        # Finetune from pretrained
-        modal run scripts/train_vae.py --pretrained 350M-f16x64 --freeze-encoder --steps 10000
-    """
+    """Modal entrypoint for VAE training. See README.md for examples."""
     print(f"Starting training on Modal (8x A100)...")
     print(f"  Data: {data}")
     print(f"  Variant: {variant}")
