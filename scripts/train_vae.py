@@ -39,6 +39,7 @@ from vitok.pp.io import postprocess
 from vitok.pp import sample_tiles
 from vitok import utils as tu
 from vitok.metrics import MetricCalculator
+from scripts.modal.modal_config import image, gpu
 
 # Perceptual losses
 from dino_perceptual import DINOPerceptual
@@ -117,41 +118,34 @@ def main():
 
     # Run on Modal if requested
     if args.modal:
-        from scripts.modal.modal_config import multi_gpu_modal
+        import modal
 
-        # Capture all args for the remote function
         train_args = vars(args).copy()
-        train_args.pop('modal')  # Don't pass modal flag to remote
+        train_args.pop('modal')
+        # Use /output volume for checkpoints on Modal
+        if train_args.get('output_dir') == 'checkpoints/vae':
+            train_args['output_dir'] = '/output/checkpoints'
 
-        @multi_gpu_modal("vitok-train", gpu="A100:8", timeout=86400)
-        def run():
+        app = modal.App("vitok-train")
+
+        @app.function(image=image, **gpu("A100:8", timeout=86400))
+        def run_training():
             import subprocess
             import sys
-
-            # Build command line for torchrun
             cmd = [
                 sys.executable, "-m", "torch.distributed.run",
-                "--nproc_per_node=8",
-                "scripts/train_vae.py",
-                "--fsdp",  # Always use FSDP for multi-GPU
+                "--nproc_per_node=8", "scripts/train_vae.py", "--fsdp",
             ]
-
-            # Add all other arguments
             for key, value in train_args.items():
-                if value is None or value is False:
-                    continue
-                if key == 'fsdp':  # Already added
+                if value is None or value is False or key == 'fsdp':
                     continue
                 arg_name = f"--{key.replace('_', '-')}" if '_' in key else f"--{key}"
-                if value is True:
-                    cmd.append(arg_name)
-                else:
-                    cmd.extend([arg_name, str(value)])
-
+                cmd.append(arg_name) if value is True else cmd.extend([arg_name, str(value)])
             print(f"Running: {' '.join(cmd)}")
             subprocess.run(cmd, check=True)
 
-        run()
+        with app.run():
+            run_training.remote()
         return
 
     # Validate pretrained/checkpoint args
