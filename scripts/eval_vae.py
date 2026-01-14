@@ -4,8 +4,8 @@
 See README.md for full usage examples.
 
 Quick start:
-    modal run scripts/eval_vae.py --model 350M-f16x64 --dataset coco --stream
-    modal run scripts/eval_vae.py --baseline flux --dataset coco --stream
+    modal run scripts/eval_vae.py --model 350M-f16x64 --data coco
+    modal run scripts/eval_vae.py --baseline flux --data coco
 """
 import argparse
 import json
@@ -21,75 +21,12 @@ import modal
 from vitok import AE, decode_variant
 from safetensors.torch import load_file
 from vitok.utils import setup_distributed
-from vitok.data import create_dataloader
+from vitok.data import create_dataloader, HF_DATASETS
 from vitok.pp.io import postprocess
 from vitok.metrics import MetricCalculator
 from vitok.pretrained import load_pretrained
 from torch.utils.flop_counter import FlopCounterMode
 from scripts.modal.modal_config import image, gpu, DATASET_PATHS
-
-
-# =============================================================================
-# HuggingFace Streaming Datasets
-# =============================================================================
-
-HF_DATASETS = {
-    "coco": ("detection-datasets/coco", "val", "image"),
-    "div8k": ("Iceclear/DIV8K_TrainingSet", "train", "image"),
-    "nature": ("eugenesiow/Div2k", "validation", "hr"),
-    "portraits": ("jlbaker361/celebrity-100k", "train", "image"),
-    "text": ("nielsr/funsd", "train", "image"),
-    "architecture": ("GATE-engine/mini-Unsplash", "train", "image"),
-    "animals": ("cats_vs_dogs", "train", "image"),
-}
-
-
-def create_streaming_dataloader(
-    dataset_name: str,
-    max_size: int,
-    batch_size: int,
-    num_samples: int,
-):
-    """Create a dataloader that streams from HuggingFace.
-
-    Args:
-        dataset_name: Key from HF_DATASETS
-        max_size: Image size (will center crop to square)
-        batch_size: Batch size
-        num_samples: Max number of samples to stream
-
-    Returns:
-        Iterator yielding batches of {"image": tensor [B, C, H, W] in [0, 1]}
-    """
-    from datasets import load_dataset
-    import torchvision.transforms as T
-
-    repo, split, image_key = HF_DATASETS[dataset_name]
-    ds = load_dataset(repo, split=split, streaming=True, trust_remote_code=True)
-
-    transform = T.Compose([
-        T.Lambda(lambda img: img.convert("RGB") if img.mode != "RGB" else img),
-        T.Resize(max_size, interpolation=T.InterpolationMode.BICUBIC),
-        T.CenterCrop(max_size),
-        T.ToTensor(),
-    ])
-
-    def batch_iterator():
-        batch = []
-        count = 0
-        for example in ds:
-            if count >= num_samples:
-                break
-            img = example[image_key]
-            batch.append(transform(img))
-            count += 1
-            if len(batch) == batch_size:
-                yield {"image": torch.stack(batch)}
-                batch = []
-        if batch:
-            yield {"image": torch.stack(batch)}
-
-    return batch_iterator()
 
 
 def measure_flops(encoder, decoder, batch, device, dtype):
@@ -192,9 +129,7 @@ def evaluate(
     model_name: str | None = None,
     baseline: str | None = None,
     variant: str | None = None,
-    data: str = "",
-    stream: bool = False,
-    dataset: str = "coco",
+    data: str = "coco",
     max_size: int = 512,
     batch_size: int = 16,
     num_samples: int = 5000,
@@ -216,9 +151,7 @@ def evaluate(
         model_name: Pretrained model name, e.g. "350M-f16x64" (mutually exclusive with checkpoint/baseline)
         baseline: Baseline VAE name - "flux", "sd", or "qwen" (mutually exclusive with model_name/checkpoint)
         variant: Model variant string. Required if using checkpoint, inferred if using model_name
-        data: Path to evaluation data (image folder or WebDataset)
-        stream: If True, stream from HuggingFace instead of using data path
-        dataset: Dataset name for streaming (key from HF_DATASETS)
+        data: Data source - dataset name ("coco", "div8k"), local path, or hf:// URL
         max_size: Maximum image size
         batch_size: Batch size for evaluation
         num_samples: Number of samples to evaluate
@@ -298,8 +231,7 @@ def evaluate(
     # Print model info
     if verbose:
         print(model_label)
-        source = dataset if stream else data
-        print(f"Evaluating: {source} at {max_size}px ({crop_style})")
+        print(f"Evaluating: {data} at {max_size}px ({crop_style})")
 
     # ==========================================================================
     # Compile (ViTok only)
@@ -336,15 +268,13 @@ def evaluate(
     # ==========================================================================
     # Create dataloader
     # ==========================================================================
-    if stream:
-        # Stream from HuggingFace
-        loader = create_streaming_dataloader(dataset, max_size, batch_size, num_samples)
-    elif is_baseline:
-        # Baseline with local data: simple preprocessing (outputs [0, 1] tensors)
+    is_streaming = data in HF_DATASETS
+    if is_baseline or is_streaming:
+        # Simple preprocessing (images in [0, 1])
         pp = f"resize_longest_side({max_size})|center_crop({max_size})|to_tensor"
-        loader = create_dataloader(data, pp, batch_size=batch_size, drop_last=is_distributed)
+        loader = create_dataloader(data, pp, batch_size=batch_size, num_samples=num_samples, drop_last=is_distributed)
     else:
-        # ViTok with local data: patchified preprocessing
+        # ViTok with local data (patchified)
         if crop_style == "adm_square":
             pp = f"center_crop({max_size})|to_tensor|normalize(minus_one_to_one)|patchify({patch_size}, {max_tokens})"
         else:
@@ -356,7 +286,7 @@ def evaluate(
     metric_calc.move_model_to_device(device, dtype=dtype)
 
     # Measure FLOPs on first batch (ViTok only, outside main loop)
-    if not is_baseline and not stream:
+    if not is_baseline and not is_streaming:
         first_batch = next(iter(loader))
         first_batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in first_batch.items()}
         encoder_flops, decoder_flops = measure_flops(encoder, decoder, first_batch, device, dtype)
@@ -402,7 +332,7 @@ def evaluate(
 
             samples_seen += len(images)
 
-        elif stream:
+        elif is_streaming:
             # ViTok with streaming: images in [0, 1], need to normalize and patchify
             from vitok.pp.ops import patchify as make_patchify
 
@@ -491,9 +421,7 @@ def evaluate(
         stats["compiled"] = do_compile
         stats["float8_mode"] = float8_mode
 
-    if stream:
-        stats["dataset"] = dataset
-        stats["stream"] = True
+    stats["data"] = data
 
     # Add timing stats
     if inference_times:
@@ -588,7 +516,7 @@ def main():
 
 
 # =============================================================================
-# Modal support: modal run scripts/eval_vae.py --model X --dataset coco
+# Modal support: modal run scripts/eval_vae.py --model X --data coco
 # =============================================================================
 app = modal.App("vitok-eval")
 
@@ -597,8 +525,7 @@ app = modal.App("vitok-eval")
 def run_eval_remote(
     model: str | None = None,
     baseline: str | None = None,
-    dataset: str = "coco",
-    stream: bool = False,
+    data: str = "coco",
     max_size: int = 256,
     crop_style: str = "native",
     num_samples: int = 5000,
@@ -611,27 +538,16 @@ def run_eval_remote(
     output_dir: str | None = None,
 ) -> dict:
     """Run evaluation on Modal cloud GPU."""
-    import torch
-    from scripts.eval_vae import evaluate, HF_DATASETS
+    from scripts.eval_vae import evaluate
 
-    # Determine data path
-    if stream:
-        data = ""  # Not used when streaming
-    elif dataset in DATASET_PATHS:
-        data = DATASET_PATHS[dataset]
-    elif dataset in HF_DATASETS:
-        # Dataset exists in HF_DATASETS but not on volume - must stream
-        stream = True
-        data = ""
-    else:
-        raise ValueError(f"Unknown dataset: {dataset}. Use --stream for HF datasets or ensure data is on volume.")
+    # Map volume aliases to paths (e.g., "coco-val" -> "/data/coco/val2017")
+    if data in DATASET_PATHS:
+        data = DATASET_PATHS[data]
 
     return evaluate(
         model_name=model,
         baseline=baseline,
         data=data,
-        stream=stream,
-        dataset=dataset,
         max_size=max_size,
         crop_style=crop_style,
         num_samples=num_samples,
@@ -649,8 +565,7 @@ def run_eval_remote(
 def modal_main(
     model: str = None,
     baseline: str = None,
-    dataset: str = "coco",
-    stream: bool = False,
+    data: str = "coco",
     max_size: int = 256,
     crop_style: str = "native",
     num_samples: int = 5000,
@@ -670,8 +585,7 @@ def modal_main(
     result = run_eval_remote.remote(
         model=model,
         baseline=baseline,
-        dataset=dataset,
-        stream=stream,
+        data=data,
         max_size=max_size,
         crop_style=crop_style,
         num_samples=num_samples,
