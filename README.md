@@ -344,7 +344,7 @@ Training uses a combination of losses:
 |------|--------|-------------|
 | Charbonnier | 1.0 | Smooth L1-like reconstruction loss |
 | SSIM | 0.1 | Structural similarity |
-| DINO Perceptual | 250.0 | DINO-based perceptual loss |
+| DINO Perceptual | 500.0 | DINO-based perceptual loss |
 
 ## License
 

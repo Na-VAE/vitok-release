@@ -74,7 +74,7 @@ def main():
     parser.add_argument("--charbonnier", type=float, default=1.0)
     parser.add_argument("--charbonnier_eps", type=float, default=1e-3)
     parser.add_argument("--ssim", type=float, default=0.1)
-    parser.add_argument("--dino_perceptual", type=float, default=250.0)
+    parser.add_argument("--dino_perceptual", type=float, default=500.0)
     parser.add_argument("--tile_size", type=int, default=256,
                         help="Tile size for perceptual losses")
     parser.add_argument("--n_tiles", type=int, default=1,
