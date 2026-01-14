@@ -286,20 +286,19 @@ Train on Modal's cloud GPUs (8x A100):
 modal secret create wandb-secret WANDB_API_KEY=<your-key>
 
 # Train with defaults (ImageNet-22k, 8x A100, FSDP)
-python scripts/train_vae.py --modal --wandb-project vitok --wandb-name my-run
+modal run scripts/train_vae.py --steps 100000 --wandb-project vitok
 
 # Custom training
-python scripts/train_vae.py --modal \
+modal run scripts/train_vae.py \
+    --data hf://ILSVRC/imagenet-1k/train-{00000..01023}.tar \
     --variant Ld2-Ld22/1x16x64 \
-    --batch-size 64 \
-    --steps 100000 \
-    --wandb-project vitok
+    --steps 50000
 
 # Finetune from pretrained
-python scripts/train_vae.py --modal \
-    --pretrained 350M-f16x64 \
-    --freeze-encoder \
-    --steps 10000
+modal run scripts/train_vae.py --pretrained 350M-f16x64 --freeze-encoder --steps 10000
+
+# Check training progress
+modal volume ls vitok-output /checkpoints
 ```
 
 ### Local Training
