@@ -60,16 +60,22 @@ def postprocess(
     """Postprocess model output into images.
 
     Args:
-        output: patch dict with 'patches' or 'images'
+        output: Either a patch dict with 'patches' key, or an image tensor [B, C, H, W]
         output_format: Target format ("minus_one_to_one", "zero_to_one", "0_255")
         current_format: Current format of the output
-        do_unpack: Whether to crop to original sizes (requires dict input)
-        patch: Patch size for unpatchify
-        max_grid_size: Maximum grid size for unpatchify
+        do_unpack: Whether to crop to original sizes (requires dict input with orig_height/width)
+        patch: Patch size for unpatchify (only used for patch dicts)
+        max_grid_size: Maximum grid size for unpatchify (only used for patch dicts)
 
     Returns:
-        Images tensor or list of tensors (if do_unpack=True)
+        Images tensor [B, C, H, W] or list of tensors (if do_unpack=True with patch dict)
     """
+    # Handle both patch dicts and raw image tensors
+    if isinstance(output, torch.Tensor):
+        # Already an image tensor [B, C, H, W], just convert format
+        return _convert_format(output, current_format, output_format)
+
+    # Patch dict - unpatchify first
     images = unpatchify(output, patch=patch, max_grid_size=max_grid_size)
     images = _convert_format(images, current_format, output_format)
     if do_unpack:

@@ -12,7 +12,6 @@ import json
 import time
 from pathlib import Path
 import torch
-import torchvision.transforms.functional as TF
 from tqdm import tqdm
 
 import torch.distributed as dist
@@ -21,7 +20,7 @@ import modal
 from vitok import AE, decode_variant
 from safetensors.torch import load_file
 from vitok.utils import setup_distributed
-from vitok.data import create_dataloader, HF_DATASETS
+from vitok.data import create_dataloader
 from vitok.pp.io import postprocess
 from vitok.metrics import MetricCalculator
 from vitok.pretrained import load_pretrained
@@ -46,82 +45,6 @@ def measure_flops(encoder, decoder, batch, device, dtype):
         return encoder_flops, decoder_flops
     except Exception:
         return 0, 0
-
-
-def save_comparison_grid(
-    originals: list[torch.Tensor],
-    reconstructions: list[torch.Tensor],
-    output_path: Path,
-    max_images: int = 8,
-) -> None:
-    """Save a grid of original | reconstruction | diff images.
-
-    Args:
-        originals: List of original images [C, H, W] in [0, 1]
-        reconstructions: List of reconstructed images [C, H, W] in [0, 1]
-        output_path: Path to save the grid image
-        max_images: Maximum number of images to include
-    """
-    from PIL import Image
-
-    n = min(len(originals), max_images)
-    if n == 0:
-        return
-
-    # Convert to PIL images and compute diffs
-    rows = []
-    for i in range(n):
-        # Convert to float32 for PIL compatibility
-        orig = originals[i].float().clamp(0, 1)
-        recon = reconstructions[i].float().clamp(0, 1)
-
-        # Compute diff (amplified for visibility)
-        diff = (orig - recon).abs() * 5  # Amplify by 5x
-        diff = diff.clamp(0, 1)
-
-        # Convert to PIL
-        orig_pil = TF.to_pil_image(orig)
-        recon_pil = TF.to_pil_image(recon)
-        diff_pil = TF.to_pil_image(diff)
-
-        rows.append((orig_pil, recon_pil, diff_pil))
-
-    # Create grid
-    w, h = rows[0][0].size
-    grid = Image.new('RGB', (w * 3, h * n))
-
-    for i, (orig, recon, diff) in enumerate(rows):
-        grid.paste(orig, (0, i * h))
-        grid.paste(recon, (w, i * h))
-        grid.paste(diff, (w * 2, i * h))
-
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    grid.save(output_path, quality=95)
-
-
-def save_individual_samples(
-    originals: list[torch.Tensor],
-    reconstructions: list[torch.Tensor],
-    output_dir: Path,
-    prefix: str = "sample",
-) -> None:
-    """Save individual original/reconstruction pairs.
-
-    Args:
-        originals: List of original images [C, H, W] in [0, 1]
-        reconstructions: List of reconstructed images [C, H, W] in [0, 1]
-        output_dir: Directory to save images
-        prefix: Filename prefix
-    """
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    for i, (orig, recon) in enumerate(zip(originals, reconstructions)):
-        # Convert to float32 for PIL compatibility
-        orig = orig.float().clamp(0, 1)
-        recon = recon.float().clamp(0, 1)
-
-        TF.to_pil_image(orig).save(output_dir / f"{prefix}_{i:03d}_orig.png")
-        TF.to_pil_image(recon).save(output_dir / f"{prefix}_{i:03d}_recon.png")
 
 
 def evaluate(
@@ -268,8 +191,7 @@ def evaluate(
     # ==========================================================================
     # Create dataloader
     # ==========================================================================
-    is_streaming = data in HF_DATASETS
-    if is_baseline or is_streaming:
+    if is_baseline:
         # Simple preprocessing (images in [0, 1])
         pp = f"resize_longest_side({max_size})|center_crop({max_size})|to_tensor"
         loader = create_dataloader(data, pp, batch_size=batch_size, num_samples=num_samples, drop_last=is_distributed)
@@ -286,7 +208,7 @@ def evaluate(
     metric_calc.move_model_to_device(device, dtype=dtype)
 
     # Measure FLOPs on first batch (ViTok only, outside main loop)
-    if not is_baseline and not is_streaming:
+    if not is_baseline:
         first_batch = next(iter(loader))
         first_batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in first_batch.items()}
         encoder_flops, decoder_flops = measure_flops(encoder, decoder, first_batch, device, dtype)
@@ -303,97 +225,43 @@ def evaluate(
     # ==========================================================================
     # Main evaluation loop
     # ==========================================================================
+    grid_size = max_size // patch_size
+
     for batch in tqdm(loader, disable=not verbose):
         if samples_seen >= num_samples:
             break
 
         batch_start = time.perf_counter()
 
+        # Forward pass: get ref/recon in [0, 1] for visuals, [-1, 1] for metrics
         if is_baseline:
-            # Baseline: batch is {"image": tensor} with images in [0, 1]
-            if isinstance(batch, dict):
-                images = batch["image"].to(device, dtype=dtype)
-            else:
-                images = batch.to(device, dtype=dtype)
-
+            images = batch["image"].to(device, dtype=dtype) if isinstance(batch, dict) else batch.to(device, dtype=dtype)
             with torch.no_grad():
                 recon = vae.encode_decode(images)
-
-            # Metrics expect [-1, 1] range
-            ref = images * 2 - 1
-            recon_norm = recon * 2 - 1
-            metric_calc.update(ref, recon_norm)
-
-            # Collect visuals (keep in [0, 1] for saving)
-            if save_visuals > 0 and len(visual_originals) < save_visuals:
-                for i in range(min(len(images), save_visuals - len(visual_originals))):
-                    visual_originals.append(images[i].cpu())
-                    visual_recons.append(recon[i].cpu())
-
-            samples_seen += len(images)
-
-        elif is_streaming:
-            # ViTok with streaming: images in [0, 1], need to normalize and patchify
-            from vitok.pp.ops import patchify as make_patchify
-
-            if isinstance(batch, dict):
-                images = batch["image"].to(device, dtype=dtype)
-            else:
-                images = batch.to(device, dtype=dtype)
-
-            # Normalize to [-1, 1] and patchify each image
-            images_norm = images * 2 - 1  # [0,1] -> [-1,1]
-            patchify_fn = make_patchify(patch_size, max_tokens)
-
-            # Patchify each image and collate
-            patchified_list = [patchify_fn(img) for img in images_norm]
-            patchified = {
-                "patches": torch.stack([p["patches"] for p in patchified_list]).to(device),
-                "patch_sizes": torch.stack([torch.tensor([p["grid_rows"], p["grid_cols"]]) for p in patchified_list]).to(device),
-                "patch_mask": torch.stack([p["patch_mask"] for p in patchified_list]).to(device),
-                "row_idx": torch.stack([p["row_idx"] for p in patchified_list]).to(device),
-                "col_idx": torch.stack([p["col_idx"] for p in patchified_list]).to(device),
-                "orig_height": torch.stack([p["orig_height"] for p in patchified_list]).to(device),
-                "orig_width": torch.stack([p["orig_width"] for p in patchified_list]).to(device),
-            }
-
-            with torch.no_grad(), torch.autocast(device_type="cuda", dtype=dtype, enabled=device.type == "cuda"):
-                encoded = encoder.encode(patchified)
-                output = decoder.decode(encoded)
-
-            grid_size = max_size // patch_size
-            ref = postprocess(patchified, do_unpack=True, patch=patch_size, max_grid_size=grid_size, output_format="minus_one_to_one")
-            recon = postprocess(output, do_unpack=True, patch=patch_size, max_grid_size=grid_size, output_format="minus_one_to_one")
-            metric_calc.update(ref, recon)
-
-            # Collect visuals (convert from [-1, 1] to [0, 1] for saving)
-            if save_visuals > 0 and len(visual_originals) < save_visuals:
-                for i in range(min(len(ref), save_visuals - len(visual_originals))):
-                    visual_originals.append(((ref[i] + 1.0) / 2.0).clamp(0, 1).cpu())
-                    visual_recons.append(((recon[i] + 1.0) / 2.0).clamp(0, 1).cpu())
-
-            samples_seen += len(images)
-
+            # Baseline outputs [0,1], postprocess converts to [-1,1] for metrics
+            ref = postprocess(images, current_format="zero_to_one", output_format="minus_one_to_one")
+            recon = postprocess(recon, current_format="zero_to_one", output_format="minus_one_to_one")
+            batch_size_actual = len(images)
         else:
-            # ViTok with local data: batch is already patchified dict
             batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
-
             with torch.no_grad(), torch.autocast(device_type="cuda", dtype=dtype, enabled=device.type == "cuda"):
                 encoded = encoder.encode(batch)
                 output = decoder.decode(encoded)
-
-            grid_size = max_size // patch_size
+            # ViTok patch dicts are [-1,1], postprocess unpatchifies and keeps [-1,1]
             ref = postprocess(batch, do_unpack=True, patch=patch_size, max_grid_size=grid_size, output_format="minus_one_to_one")
             recon = postprocess(output, do_unpack=True, patch=patch_size, max_grid_size=grid_size, output_format="minus_one_to_one")
-            metric_calc.update(ref, recon)
+            batch_size_actual = len(batch["patches"])
 
-            # Collect visuals (convert from [-1, 1] to [0, 1] for saving)
-            if save_visuals > 0 and len(visual_originals) < save_visuals:
-                for i in range(min(len(ref), save_visuals - len(visual_originals))):
-                    visual_originals.append(((ref[i] + 1.0) / 2.0).clamp(0, 1).cpu())
-                    visual_recons.append(((recon[i] + 1.0) / 2.0).clamp(0, 1).cpu())
+        # Update metrics (expects [-1, 1] range)
+        metric_calc.update(ref, recon)
 
-            samples_seen += len(batch["patches"])
+        # Collect visuals (convert to [0, 1] for saving)
+        if save_visuals > 0 and len(visual_originals) < save_visuals:
+            for i in range(min(len(ref), save_visuals - len(visual_originals))):
+                visual_originals.append(((ref[i] + 1.0) / 2.0).clamp(0, 1).cpu())
+                visual_recons.append(((recon[i] + 1.0) / 2.0).clamp(0, 1).cpu())
+
+        samples_seen += batch_size_actual
 
         batch_time = time.perf_counter() - batch_start
         inference_times.append(batch_time)
@@ -442,14 +310,13 @@ def evaluate(
         stats["decoder_gflops"] = decoder_flops / 1e9
         stats["total_gflops_per_img"] = total_flops / 1e9
 
-    # Save visuals
+    # Save visuals as tensors (can generate comparison grids later)
     if save_visuals > 0 and output_dir is not None:
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
-        save_comparison_grid(visual_originals, visual_recons, output_dir / "comparison_grid.jpg", max_images=save_visuals)
-        save_individual_samples(visual_originals, visual_recons, output_dir / "samples")
+        torch.save({"ref": visual_originals, "recon": visual_recons}, output_dir / "visuals.pt")
         if verbose:
-            print(f"Saved visuals to: {output_dir}")
+            print(f"Saved {len(visual_originals)} visual samples to: {output_dir / 'visuals.pt'}")
 
     return stats
 
