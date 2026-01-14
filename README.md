@@ -165,16 +165,16 @@ Stream datasets directly from HuggingFace - no need to pre-download anything:
 
 ```bash
 # Stream COCO validation set
-modal run scripts/eval_vae.py --model 350M-f16x64 --dataset coco --stream
+modal run scripts/eval_vae.py --model 350M-f16x64 --data coco
 
 # Stream other datasets
-modal run scripts/eval_vae.py --model 350M-f16x64 --dataset div8k --stream      # High-res photos
-modal run scripts/eval_vae.py --model 350M-f16x64 --dataset nature --stream     # Nature/landscapes
-modal run scripts/eval_vae.py --model 350M-f16x64 --dataset portraits --stream  # Human faces
-modal run scripts/eval_vae.py --model 350M-f16x64 --dataset animals --stream    # Cats and dogs
+modal run scripts/eval_vae.py --model 350M-f16x64 --data div8k      # High-res photos
+modal run scripts/eval_vae.py --model 350M-f16x64 --data nature     # Nature/landscapes
+modal run scripts/eval_vae.py --model 350M-f16x64 --data portraits  # Human faces
+modal run scripts/eval_vae.py --model 350M-f16x64 --data animals    # Cats and dogs
 
 # With options
-modal run scripts/eval_vae.py --model 350M-f16x64 --dataset coco --stream \
+modal run scripts/eval_vae.py --model 350M-f16x64 --data coco \
     --max-size 512 --num-samples 1000 --batch-size 32
 ```
 
@@ -195,9 +195,9 @@ Evaluate Flux, Stable Diffusion, or Qwen VAEs for comparison:
 
 ```bash
 # Baseline VAEs
-modal run scripts/eval_vae.py --baseline flux --dataset coco --stream
-modal run scripts/eval_vae.py --baseline sd --dataset coco --stream
-modal run scripts/eval_vae.py --baseline qwen --dataset coco --stream
+modal run scripts/eval_vae.py --baseline flux --data coco
+modal run scripts/eval_vae.py --baseline sd --data coco
+modal run scripts/eval_vae.py --baseline qwen --data coco
 ```
 
 #### Save Visual Samples
@@ -206,7 +206,7 @@ Save original/reconstruction pairs for qualitative comparison:
 
 ```bash
 # Save 20 sample images to Modal volume
-modal run scripts/eval_vae.py --model 350M-f16x64 --dataset coco --stream \
+modal run scripts/eval_vae.py --model 350M-f16x64 --data coco \
     --save-visuals 20 --output-dir /output/samples/coco
 
 # Download from Modal volume
@@ -219,12 +219,12 @@ For repeated evaluations, pre-download datasets to Modal volume:
 
 ```bash
 # Download datasets to Modal volume (one-time)
-modal run scripts/modal/setup_data.py --dataset coco
-modal run scripts/modal/setup_data.py --dataset div8k
+modal run scripts/modal/setup_data.py --data coco
+modal run scripts/modal/setup_data.py --data div8k
 
 # Evaluate with pre-downloaded data (faster, no streaming overhead)
-modal run scripts/eval_vae.py --model 350M-f16x64 --dataset coco-val
-modal run scripts/eval_vae.py --model 350M-f16x64 --dataset div8k --max-size 1024
+modal run scripts/eval_vae.py --model 350M-f16x64 --data coco-val
+modal run scripts/eval_vae.py --model 350M-f16x64 --data div8k --max-size 1024
 ```
 
 ### Local Evaluation
