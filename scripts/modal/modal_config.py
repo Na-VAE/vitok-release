@@ -36,6 +36,11 @@ PACKAGES = [
     "torchmetrics>=1.0.0",
     "torchao>=0.5.0",
     "wandb",
+    # For baseline VAEs and streaming datasets
+    "diffusers>=0.25.0",
+    "transformers>=4.36.0",
+    "accelerate>=0.25.0",
+    "datasets>=2.16.0",
 ]
 
 image = (
