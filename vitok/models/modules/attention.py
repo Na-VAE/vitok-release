@@ -10,7 +10,7 @@ from typing import Dict, Literal, Optional, Tuple
 from vitok.models.modules.norm import RMSNorm, LayerNorm
 from vitok.models.modules.rotary_embedding import apply_rotary_emb
 
-AttnBackend = Literal["flex", "flash", "sdpa"]
+AttnBackend = Literal["flex", "flash", "flash-1d", "sdpa"]
 
 
 # =============================================================================
@@ -165,7 +165,7 @@ class Attention(nn.Module):
         self.backend = backend
 
         # Validate flash backend availability
-        if backend == "flash" and not FLASH_ATTN_AVAILABLE:
+        if backend in ("flash", "flash-1d") and not FLASH_ATTN_AVAILABLE:
             raise ImportError("flash-attn not installed. Install with: pip install flash-attn")
 
         if qk_norm == "rmsnorm":
@@ -240,7 +240,7 @@ class Attention(nn.Module):
             q, k = apply_rotary_emb(q, k, freqs_cis[0], freqs_cis[1])
 
         # Select attention backend
-        if self.backend == "flash":
+        if self.backend in ("flash", "flash-1d"):
             attn = self._flash_attention(q, k, v, sliding_window)
         elif self.backend == "flex":
             attn = self._flex_attention(q, k, v, sliding_window, score_mod, block_mask, N)
@@ -251,20 +251,21 @@ class Attention(nn.Module):
         return self.out_proj(attn)
 
     def _flash_attention(self, q, k, v, sliding_window):
-        """Flash Attention with 1D sliding window + Hilbert curve reordering.
+        """Flash Attention with 1D sliding window.
 
-        Uses Hilbert curve to reorder patches so that 1D SWA approximates
-        2D local attention. Hilbert curves preserve spatial locality -
-        nearby 2D points stay nearby in the 1D sequence.
+        Backend "flash": Uses Hilbert curve reordering so 1D SWA approximates 2D locality.
+        Backend "flash-1d": Raw 1D SWA in raster order (no spatial locality).
         """
         B, H, N, D = q.shape
         S = self.num_special_tokens
         patch_len = N - S
 
         # Check if we can use Hilbert reordering (requires power-of-2 grid)
+        # flash-1d skips Hilbert to test raw 1D SWA
         grid_size = int(patch_len ** 0.5)
         use_hilbert = (
-            sliding_window is not None
+            self.backend == "flash"  # flash-1d skips Hilbert
+            and sliding_window is not None
             and sliding_window >= 0
             and grid_size * grid_size == patch_len
             and grid_size & (grid_size - 1) == 0  # power of 2
@@ -280,9 +281,10 @@ class Attention(nn.Module):
             fwd_idx, inv_idx = get_hilbert_indices(grid_size, S, str(q.device))
 
             # Single gather for raster -> hilbert (special tokens stay in place)
-            q = q[:, fwd_idx]
-            k = k[:, fwd_idx]
-            v = v[:, fwd_idx]
+            # inv_idx[hilbert_pos] = raster_pos, so q[:, inv_idx] reorders to hilbert
+            q = q[:, inv_idx]
+            k = k[:, inv_idx]
+            v = v[:, inv_idx]
 
         # Set window size
         if sliding_window is not None and sliding_window >= 0:
@@ -294,7 +296,8 @@ class Attention(nn.Module):
 
         if use_hilbert:
             # Single gather for hilbert -> raster
-            attn = attn[:, inv_idx]
+            # fwd_idx[raster_pos] = hilbert_pos, so attn[:, fwd_idx] reorders back
+            attn = attn[:, fwd_idx]
 
         return attn.transpose(1, 2)  # Back to [B, H, N, D]
 
@@ -330,7 +333,7 @@ class CrossAttention(nn.Module):
         self.backend = backend
 
         # Validate flash backend availability
-        if backend == "flash" and not FLASH_ATTN_AVAILABLE:
+        if backend in ("flash", "flash-1d") and not FLASH_ATTN_AVAILABLE:
             raise ImportError("flash-attn not installed. Install with: pip install flash-attn")
 
         if qk_norm == "rmsnorm":
