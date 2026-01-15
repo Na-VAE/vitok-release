@@ -270,10 +270,6 @@ def patchify(patch: int = 16, max_tokens: int = 256):
 
         time_idx = torch.zeros(max_tokens, dtype=torch.long)
 
-        # Step 5: Create attention mask
-        attn_mask = patch_mask.unsqueeze(0) & patch_mask.unsqueeze(1)
-        attn_mask = attn_mask | torch.eye(max_tokens, dtype=torch.bool)
-
         return {
             'patches': patches_full,
             'patch_mask': patch_mask,
@@ -284,7 +280,6 @@ def patchify(patch: int = 16, max_tokens: int = 256):
             'orig_width': torch.tensor(orig_w, dtype=torch.long),
             'grid_rows': torch.tensor(grid_rows, dtype=torch.long),
             'grid_cols': torch.tensor(grid_cols, dtype=torch.long),
-            'attention_mask': attn_mask,
         }
 
     return _patchify

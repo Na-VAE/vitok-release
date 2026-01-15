@@ -24,10 +24,11 @@ from skimage.metrics import peak_signal_noise_ratio, structural_similarity
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from vitok import AE, decode_variant, preprocess, postprocess
-from vitok.pretrained import download_pretrained, get_pretrained_info, PRETRAINED_ALIASES
+from vitok.pretrained import download_pretrained, get_pretrained_info, list_pretrained
 
-# Available models
-MODELS = list(PRETRAINED_ALIASES.keys())
+# Available models (sorted with 5B-f16x64 first for best quality default)
+_all_models = list_pretrained()
+MODELS = sorted(_all_models, key=lambda x: (x != "5B-f16x64", x))
 
 # Device setup
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -195,7 +196,8 @@ with gr.Blocks(
         Upload an image to see how ViTok encodes and reconstructs it.
         The difference heatmap shows reconstruction error (blue=low, red=high).
 
-        **Models:** L (Large, 1.1B params) and T (Tiny) variants with different latent channel sizes.
+        **Models:** 350M (51M enc + 303M dec) and 5B (463M enc + 4.5B dec) variants.
+        Format: `{size}-f{stride}x{channels}` (e.g., 5B-f16x64 = 5B params, stride 16, 64 channels)
         """
     )
 
@@ -208,9 +210,9 @@ with gr.Blocks(
             )
             model_dropdown = gr.Dropdown(
                 choices=MODELS,
-                value="L-64",
+                value="5B-f16x64",
                 label="Model",
-                info="L=Large (1.1B), T=Tiny. Number=latent channels."
+                info="350M or 5B params. f{stride}x{channels}."
             )
             submit_btn = gr.Button("Reconstruct", variant="primary", size="lg")
 
@@ -238,7 +240,7 @@ with gr.Blocks(
         example_images = list(example_dir.glob("*.jpg")) + list(example_dir.glob("*.png"))
         if example_images:
             gr.Examples(
-                examples=[[str(img), "L-64"] for img in example_images[:4]],
+                examples=[[str(img), "5B-f16x64"] for img in example_images[:4]],
                 inputs=[input_image, model_dropdown],
                 outputs=[original_display, recon_display, diff_display, metrics_output, latent_output],
                 fn=reconstruct_image,
