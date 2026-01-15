@@ -115,22 +115,20 @@ def train(args):
     if args.freeze_encoder and not args.pretrained:
         raise ValueError("--freeze_encoder requires --pretrained to be specified.")
 
-    # Auto-infer variant from pretrained model if using pretrained
-    if args.pretrained:
-        from vitok.pretrained import get_pretrained_info
-        try:
-            _, _, variant = get_pretrained_info(args.pretrained)
-            args.variant = variant
-            print(f"Auto-inferred variant '{variant}' from pretrained model '{args.pretrained}'")
-        except KeyError:
-            # If not a known pretrained model (e.g., local file), keep user-specified variant
-            pass
-
     # Handle compile flag (--compile is default True, --no_compile disables it)
     use_compile = args.compile and not args.no_compile
 
     # Setup distributed
     rank, world_size, local_rank, device, device_mesh = tu.setup_distributed(args.seed)
+
+    # Load pretrained weights (call once, reuse for weight loading later)
+    pretrained_weights = None
+    if args.pretrained:
+        from vitok.pretrained import load_pretrained
+        pretrained_weights = load_pretrained(args.pretrained)
+        args.variant = pretrained_weights['variant']
+        if rank == 0:
+            print(f"Using variant '{args.variant}' from pretrained model '{args.pretrained}'")
     dtype = torch.bfloat16
     use_fsdp = args.fsdp and world_size > 1
 
@@ -151,9 +149,16 @@ def train(args):
     model.to(device=device, dtype=dtype)
 
     # Load pretrained weights for finetuning (must be before compile/FSDP)
-    if args.pretrained:
-        from vitok.utils import load_pretrained_weights
-        model = load_pretrained_weights(model, args.pretrained, device, dtype, rank, args.freeze_encoder)
+    if pretrained_weights is not None:
+        model.encoder.load_state_dict(pretrained_weights['encoder'], strict=False)
+        model.decoder.load_state_dict(pretrained_weights['decoder'], strict=False)
+        if rank == 0:
+            print(f"Loaded pretrained weights from '{args.pretrained}'")
+        if args.freeze_encoder:
+            for param in model.encoder.parameters():
+                param.requires_grad = False
+            if rank == 0:
+                print("Encoder frozen for decoder-only finetuning")
 
     # Compile if requested (before FSDP/DDP wrapping)
     if use_compile:
@@ -492,14 +497,14 @@ def train(args):
 
         # Save checkpoint
         if step % args.save_freq == 0:
-            tu.save_checkpoint(train_state, str(output_dir), step, rank, world_size)
+            tu.save_checkpoint(train_state, str(output_dir))
             if rank == 0:
                 print(f"Saved checkpoint at step {step}")
 
     pbar.close()
 
     # Final save
-    tu.save_checkpoint(train_state, str(output_dir), step, rank, world_size)
+    tu.save_checkpoint(train_state, str(output_dir))
     if rank == 0:
         print(f"\nTraining complete! Final checkpoint saved.")
 

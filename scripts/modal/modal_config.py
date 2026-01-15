@@ -22,8 +22,8 @@ import modal
 # =============================================================================
 
 PACKAGES = [
-    "torch==2.6.0",
-    "torchvision==0.21.0",
+    "torch==2.8.0",
+    "torchvision==0.23.0",
     "safetensors>=0.4.0",
     "huggingface_hub>=0.23.0",
     "pillow>=10.0.0",
@@ -41,13 +41,20 @@ PACKAGES = [
     "transformers>=4.36.0",
     "accelerate>=0.25.0",
     "datasets>=2.16.0",
+    # Note: flash-attn removed - using flex_attention for 2D SWA instead
+    # flash-attn requires packaging + complex build, not worth the hassle
 ]
 
 image = (
     modal.Image.debian_slim(python_version="3.10")
     .apt_install("wget", "unzip", "curl")
     .pip_install(*PACKAGES)
-    .env({"PYTHONPATH": "/root/vitok-release"})
+    .env({
+        "PYTHONPATH": "/root/vitok-release",
+        # Use weights from volume (run setup_weights.py first)
+        "HF_HOME": "/data/weights/huggingface",
+        "TORCH_HOME": "/data/weights/torch",
+    })
     .add_local_dir("vitok", remote_path="/root/vitok-release/vitok")
     .add_local_dir("scripts", remote_path="/root/vitok-release/scripts")
 )
@@ -83,5 +90,12 @@ def gpu(name: str, timeout: int = 3600) -> dict:
 DATASET_PATHS = {
     "coco-val": "/data/coco/val2017",
     "imagenet-val": "/data/imagenet/val",
-    "div8k": "/data/div8k/val",
+    "div8k": "/data/div8k/train",  # 1500 images from DIV8K train set (Iceclear/DIV8K_TrainingSet)
+    # Benchmark datasets for visual comparison
+    "kodak": "/data/benchmarks/kodak",  # 24 images, 768x512
+    "set14": "/data/benchmarks/set14",  # 14 images, classic SR benchmark
+    "urban100": "/data/benchmarks/urban100",  # 100 images, architecture
+    "bsd100": "/data/benchmarks/bsd100",  # 100 images, natural scenes
+    "celeba": "/data/benchmarks/celeba",  # 50 images, faces
+    "challenge": "/data/benchmarks/challenge",  # 5 images, hand-picked hard cases
 }

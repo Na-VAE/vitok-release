@@ -67,6 +67,10 @@ HF_DATASETS = {
     "text": ("nielsr/funsd", "train", "image"),
     "architecture": ("GATE-engine/mini-Unsplash", "train", "image"),
     "animals": ("cats_vs_dogs", "train", "image"),
+    # Blog visual categories (aliases + new)
+    "foliage": ("eugenesiow/Div2k", "validation", "hr"),  # alias for nature
+    "faces": ("nielsr/CelebA-faces", "train", "image"),  # close-up faces
+    "urban": ("GATE-engine/mini-Unsplash", "train", "image"),  # alias for architecture
 }
 
 
@@ -166,9 +170,13 @@ class ImageFolderDataset(torch.utils.data.Dataset):
         path = self.files[idx]
         img = Image.open(path)
         img = to_rgb(img)
-        patch_dict = self.transform(img)
-        patch_dict["label"] = -1
-        return patch_dict
+        transformed = self.transform(img)
+        # Handle both tensor and dict outputs from transform
+        if isinstance(transformed, dict):
+            transformed["label"] = -1
+            return transformed
+        else:
+            return {"image": transformed, "label": -1}
 
 
 def _create_hf_streaming_loader(
@@ -286,10 +294,14 @@ def create_dataloader(
 
     def _transform_sample(s):
         """Transform image and include label in output dict."""
-        patch_dict = transform(s["image"])
-        label = s.get("cls") or s.get("cls.txt")
-        patch_dict["label"] = _decode_label(label)
-        return patch_dict
+        transformed = transform(s["image"])
+        label = _decode_label(s.get("cls") or s.get("cls.txt"))
+        # Handle both tensor and dict outputs from transform
+        if isinstance(transformed, dict):
+            transformed["label"] = label
+            return transformed
+        else:
+            return {"image": transformed, "label": label}
 
     dataset = (
         wds.WebDataset(urls, resampled=True, handler=wds.ignore_and_continue)
@@ -318,7 +330,25 @@ def create_dataloader(
 
 
 def _resolve_source(source: str, seed: int = 0) -> list[str]:
-    """Convert source string to list of URLs for WebDataset."""
+    """Convert source string to list of URLs for WebDataset.
+
+    Supports comma-separated sources for mixing multiple datasets:
+        "hf://repo1/data-{0000..0099}.tar,hf://repo2/data-{0000..0049}.tar"
+    """
+    # Handle comma-separated multiple sources
+    if ',' in source:
+        all_urls = []
+        for s in source.split(','):
+            s = s.strip()
+            if s.startswith("hf://"):
+                all_urls.extend(_hf_to_urls(s, seed))
+            else:
+                all_urls.extend(_local_to_urls(s, seed))
+        # Shuffle combined URLs
+        rng = random.Random(seed)
+        rng.shuffle(all_urls)
+        return all_urls
+
     if source.startswith("hf://"):
         return _hf_to_urls(source, seed)
     return _local_to_urls(source, seed)
