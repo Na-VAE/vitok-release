@@ -182,14 +182,19 @@ class Attention(nn.Module):
         return self.out_proj(attn)
 
     def _flash_attention(self, q, k, v, sliding_window):
-        """Flash Attention with 1D sliding window."""
+        """Flash Attention with 1D sliding window.
+
+        Note: 1D SWA only captures horizontal neighbors in raster order.
+        For 256x256 patches, vertical neighbors are 256 tokens apart.
+        Use window >= grid_width for vertical coverage.
+        """
         # flash_attn expects [B, N, H, D], we have [B, H, N, D]
         q = q.transpose(1, 2).contiguous()
         k = k.transpose(1, 2).contiguous()
         v = v.transpose(1, 2).contiguous()
 
         if sliding_window is not None and sliding_window >= 0:
-            window_size = (64, 64)  # 1D window of 64 tokens each direction
+            window_size = (sliding_window, sliding_window)
         else:
             window_size = (-1, -1)  # Full attention
 
