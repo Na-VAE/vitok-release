@@ -5,7 +5,7 @@ import torch.nn as nn
 import math
 from typing import Optional, Tuple, Dict
 
-from vitok.models.modules.attention import Attention, create_2d_block_mask
+from vitok.models.modules.attention import Attention
 from vitok.models.modules.norm import LayerNorm
 from vitok.models.modules.mlp import SwiGLU
 from vitok.models.modules.layerscale import LayerScale
@@ -159,8 +159,6 @@ class DiT(nn.Module):
         self.train_seq_len = train_seq_len
         self.freq_dim = freq_dim
 
-        self._block_mask = None
-
         self.input_proj = nn.Linear(code_width, width, bias=False)
 
         self.cls_token = nn.Parameter(torch.zeros(1, 1, width)) if class_token else None
@@ -204,14 +202,6 @@ class DiT(nn.Module):
         self.blocks = nn.ModuleList(blocks)
 
         self.final_layer = FinalLayer(dim=width, out_dim=code_width)
-
-        if self.sw is not None and self.train_seq_len is not None:
-            self._block_mask = create_2d_block_mask(
-                window=self.sw,
-                seq_len=self.train_seq_len,
-                num_special=self.num_special_tokens,
-                device=torch.device('cuda'),
-            )
 
     def _should_checkpoint(self, layer_idx: int) -> bool:
         return self.checkpoint > 0 and self.training and (layer_idx % self.checkpoint == 0)
@@ -320,10 +310,10 @@ class DiT(nn.Module):
         for layer_idx, block in enumerate(self.blocks):
             if self._should_checkpoint(layer_idx):
                 def run_block(_x):
-                    return block(_x, mod_params, freqs_cis, attn_mask, self._block_mask)
+                    return block(_x, mod_params, freqs_cis, attn_mask)
                 x = torch.utils.checkpoint.checkpoint(run_block, x, use_reentrant=False)
             else:
-                x = block(x, mod_params, freqs_cis, attn_mask, self._block_mask)
+                x = block(x, mod_params, freqs_cis, attn_mask)
 
         # Remove special tokens
         if self.num_special_tokens > 0:
