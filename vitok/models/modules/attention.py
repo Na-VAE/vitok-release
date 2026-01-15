@@ -4,12 +4,81 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn.attention.flex_attention import flex_attention, create_block_mask
+from functools import lru_cache
 from typing import Dict, Literal, Optional, Tuple
 
 from vitok.models.modules.norm import RMSNorm, LayerNorm
 from vitok.models.modules.rotary_embedding import apply_rotary_emb
 
 AttnBackend = Literal["flex", "flash", "sdpa"]
+
+
+# =============================================================================
+# Hilbert curve for 2D-aware 1D ordering
+# =============================================================================
+
+def _hilbert_d2xy(n: int, d: int) -> Tuple[int, int]:
+    """Convert Hilbert curve index d to (x, y) coordinates for n x n grid."""
+    x = y = 0
+    s = 1
+    while s < n:
+        rx = 1 & (d // 2)
+        ry = 1 & (d ^ rx)
+        if ry == 0:
+            if rx == 1:
+                x = s - 1 - x
+                y = s - 1 - y
+            x, y = y, x
+        x += s * rx
+        y += s * ry
+        d //= 4
+        s *= 2
+    return x, y
+
+
+@lru_cache(maxsize=32)
+def get_hilbert_indices(grid_size: int, num_special: int = 0, device: str = "cpu") -> Tuple[torch.Tensor, torch.Tensor]:
+    """Get Hilbert curve indices for reordering a grid_size x grid_size patch grid.
+
+    Args:
+        grid_size: Size of the square grid (must be power of 2)
+        num_special: Number of special tokens at the start (kept in place)
+        device: Target device for tensors
+
+    Returns:
+        forward_indices: indices to convert raster -> hilbert order (includes special tokens)
+        inverse_indices: indices to convert hilbert -> raster order (includes special tokens)
+    """
+    n = grid_size
+    # Hilbert curve requires power of 2
+    if n & (n - 1) != 0:
+        raise ValueError(f"Hilbert curve requires power-of-2 grid size, got {n}")
+
+    # Build mapping: hilbert_idx -> (x, y) -> raster_idx
+    hilbert_to_raster = []
+    for d in range(n * n):
+        x, y = _hilbert_d2xy(n, d)
+        raster_idx = y * n + x
+        hilbert_to_raster.append(raster_idx)
+
+    # inverse_indices[hilbert_pos] = raster_pos (for hilbert->raster)
+    inv_patches = torch.tensor(hilbert_to_raster, dtype=torch.long, device=device)
+
+    # forward_indices[raster_pos] = hilbert_pos (for raster->hilbert)
+    fwd_patches = torch.zeros_like(inv_patches)
+    fwd_patches[inv_patches] = torch.arange(n * n, device=device)
+
+    # Build full indices including special tokens at the front
+    if num_special > 0:
+        special_range = torch.arange(num_special, dtype=torch.long, device=device)
+        # Special tokens stay in place, patch indices are offset by num_special
+        forward_indices = torch.cat([special_range, fwd_patches + num_special])
+        inverse_indices = torch.cat([special_range, inv_patches + num_special])
+    else:
+        forward_indices = fwd_patches
+        inverse_indices = inv_patches
+
+    return forward_indices, inverse_indices
 
 # Optional flash-attn import
 try:
@@ -182,23 +251,51 @@ class Attention(nn.Module):
         return self.out_proj(attn)
 
     def _flash_attention(self, q, k, v, sliding_window):
-        """Flash Attention with 1D sliding window.
+        """Flash Attention with 1D sliding window + Hilbert curve reordering.
 
-        Note: 1D SWA only captures horizontal neighbors in raster order.
-        For 256x256 patches, vertical neighbors are 256 tokens apart.
-        Use window >= grid_width for vertical coverage.
+        Uses Hilbert curve to reorder patches so that 1D SWA approximates
+        2D local attention. Hilbert curves preserve spatial locality -
+        nearby 2D points stay nearby in the 1D sequence.
         """
+        B, H, N, D = q.shape
+        S = self.num_special_tokens
+        patch_len = N - S
+
+        # Check if we can use Hilbert reordering (requires power-of-2 grid)
+        grid_size = int(patch_len ** 0.5)
+        use_hilbert = (
+            sliding_window is not None
+            and sliding_window >= 0
+            and grid_size * grid_size == patch_len
+            and grid_size & (grid_size - 1) == 0  # power of 2
+        )
+
         # flash_attn expects [B, N, H, D], we have [B, H, N, D]
         q = q.transpose(1, 2).contiguous()
         k = k.transpose(1, 2).contiguous()
         v = v.transpose(1, 2).contiguous()
 
+        if use_hilbert:
+            # Get Hilbert indices with special tokens included (cached)
+            fwd_idx, inv_idx = get_hilbert_indices(grid_size, S, str(q.device))
+
+            # Single gather for raster -> hilbert (special tokens stay in place)
+            q = q[:, fwd_idx]
+            k = k[:, fwd_idx]
+            v = v[:, fwd_idx]
+
+        # Set window size
         if sliding_window is not None and sliding_window >= 0:
             window_size = (sliding_window, sliding_window)
         else:
             window_size = (-1, -1)  # Full attention
 
         attn = flash_attn_func(q, k, v, window_size=window_size)
+
+        if use_hilbert:
+            # Single gather for hilbert -> raster
+            attn = attn[:, inv_idx]
+
         return attn.transpose(1, 2)  # Back to [B, H, N, D]
 
     def _flex_attention(self, q, k, v, sliding_window, score_mod, block_mask, N):
