@@ -88,6 +88,7 @@ class Block(nn.Module):
         layer_scale_init: float = 1e-6,
         drop_path: float = 0.0,
         sliding_window: Optional[int] = None,
+        attn_backend: str = "flex",
     ) -> None:
         super().__init__()
 
@@ -99,6 +100,7 @@ class Block(nn.Module):
             dim=dim,
             num_heads=num_heads,
             num_special_tokens=num_special_tokens,
+            backend=attn_backend,
         )
         self.ffn = SwiGLU(dim, hidden_dim=ffn_dim)
         self.layer_scale = LayerScale(dim, layer_scale_init) if use_layer_scale else nn.Identity()
@@ -151,6 +153,7 @@ class AE(nn.Module):
         decoder: bool = True,
         sw: Optional[int] = None,
         train_seq_len: Optional[int] = None,
+        attn_backend: str = "flex",
         **kwargs,
     ):
         super().__init__()
@@ -215,6 +218,7 @@ class AE(nn.Module):
                     layer_scale_init=layer_scale_init,
                     drop_path=0.0,
                     sliding_window=sliding_window,
+                    attn_backend=attn_backend,
                 )
                 blocks.append(block)
             self.encoder_blocks = nn.ModuleList(blocks)
@@ -246,6 +250,7 @@ class AE(nn.Module):
                     layer_scale_init=layer_scale_init,
                     drop_path=decoder_dpr[layer_idx],
                     sliding_window=sliding_window,
+                    attn_backend=attn_backend,
                 )
                 blocks.append(block)
             self.decoder_blocks = nn.ModuleList(blocks)
