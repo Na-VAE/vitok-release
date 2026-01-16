@@ -16,6 +16,7 @@ let currentResolution = 'challenge-768';
 let currentImageIdx = 0;
 let currentModelA = '5B-f16x64';
 let currentModelB = 'flux';
+let heatmapVisible = false;
 
 // Initialize
 document.addEventListener('DOMContentLoaded', async () => {
@@ -24,7 +25,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     setupEventListeners();
     await loadModelMetadata();
     updateComparison();
-    setupMagnifiers();
 });
 
 // Load benchmark results
@@ -176,8 +176,8 @@ function updateComparison() {
     // Model B
     updateModelPanel('b', currentModelB, basePath, imgNum);
 
-    // Re-setup magnifiers
-    setTimeout(setupMagnifiers, 100);
+    // Setup synchronized magnifiers after images update
+    setTimeout(setupSyncedMagnifiers, 100);
 }
 
 function updateModelPanel(side, model, basePath, imgNum) {
@@ -193,6 +193,9 @@ function updateModelPanel(side, model, basePath, imgNum) {
 
     img.src = `${basePath}/${model}/recons/${imgNum}.jpg`;
     heatmap.src = `${basePath}/${model}/heatmaps_l1/${imgNum}.jpg`;
+
+    // Apply current heatmap visibility
+    heatmap.classList.toggle('visible', heatmapVisible);
 
     // Load metrics from metadata
     if (modelMetadata[model] && modelMetadata[model].images) {
@@ -244,67 +247,87 @@ function setupEventListeners() {
         updateComparison();
     });
 
-    // Heatmap toggle
+    // Heatmap toggle (simple on/off)
     document.getElementById('heatmap-toggle').addEventListener('change', (e) => {
-        const visible = e.target.checked;
+        heatmapVisible = e.target.checked;
         document.querySelectorAll('.heatmap-overlay').forEach(el => {
-            el.classList.toggle('visible', visible);
-        });
-    });
-
-    // Heatmap opacity
-    document.getElementById('heatmap-opacity').addEventListener('input', (e) => {
-        const opacity = e.target.value / 100;
-        document.querySelectorAll('.heatmap-overlay').forEach(el => {
-            el.style.opacity = opacity;
+            el.classList.toggle('visible', heatmapVisible);
         });
     });
 }
 
-// Setup magnifier effect
-function setupMagnifiers() {
-    const panels = ['panel-original', 'panel-model-a', 'panel-model-b'];
-    const imgIds = ['img-original', 'img-model-a', 'img-model-b'];
-    const magIds = ['mag-original', 'mag-model-a', 'mag-model-b'];
+// Setup synchronized magnifiers across all panels
+function setupSyncedMagnifiers() {
+    const containers = document.querySelectorAll('.image-container');
+    const imgs = [
+        document.getElementById('img-original'),
+        document.getElementById('img-model-a'),
+        document.getElementById('img-model-b')
+    ];
+    const mags = [
+        document.getElementById('mag-original'),
+        document.getElementById('mag-model-a'),
+        document.getElementById('mag-model-b')
+    ];
 
-    panels.forEach((panelId, idx) => {
-        const container = document.querySelector(`#${panelId} .image-container`);
-        const img = document.getElementById(imgIds[idx]);
-        const mag = document.getElementById(magIds[idx]);
+    const magSize = 180;
+    const zoom = 3;
 
-        if (!container || !img || !mag) return;
-
-        // Remove old listeners by cloning
+    containers.forEach((container, idx) => {
+        // Clone to remove old listeners
         const newContainer = container.cloneNode(true);
         container.parentNode.replaceChild(newContainer, container);
+    });
 
-        const newImg = document.getElementById(imgIds[idx]);
-        const newMag = document.getElementById(magIds[idx]);
+    // Re-get references after cloning
+    const newContainers = document.querySelectorAll('.image-container');
+    const newImgs = [
+        document.getElementById('img-original'),
+        document.getElementById('img-model-a'),
+        document.getElementById('img-model-b')
+    ];
+    const newMags = [
+        document.getElementById('mag-original'),
+        document.getElementById('mag-model-a'),
+        document.getElementById('mag-model-b')
+    ];
 
-        newContainer.addEventListener('mousemove', (e) => {
-            const rect = newContainer.getBoundingClientRect();
-            const x = e.clientX - rect.left;
-            const y = e.clientY - rect.top;
+    newContainers.forEach((container, sourceIdx) => {
+        container.addEventListener('mousemove', (e) => {
+            const rect = container.getBoundingClientRect();
+            const xPct = (e.clientX - rect.left) / rect.width;
+            const yPct = (e.clientY - rect.top) / rect.height;
 
-            const magSize = 150;
-            newMag.style.left = (x - magSize/2) + 'px';
-            newMag.style.top = (y - magSize/2) + 'px';
+            // Update ALL magnifiers at the same relative position
+            newContainers.forEach((targetContainer, targetIdx) => {
+                const targetRect = targetContainer.getBoundingClientRect();
+                const targetImg = newImgs[targetIdx];
+                const targetMag = newMags[targetIdx];
 
-            const zoom = 2.5;
-            const bgX = -(x * zoom - magSize/2);
-            const bgY = -(y * zoom - magSize/2);
+                if (!targetImg || !targetMag) return;
 
-            newMag.style.backgroundImage = `url(${newImg.src})`;
-            newMag.style.backgroundSize = `${rect.width * zoom}px ${rect.height * zoom}px`;
-            newMag.style.backgroundPosition = `${bgX}px ${bgY}px`;
+                // Position magnifier
+                const x = xPct * targetRect.width;
+                const y = yPct * targetRect.height;
+                targetMag.style.left = (x - magSize / 2) + 'px';
+                targetMag.style.top = (y - magSize / 2) + 'px';
+
+                // Background position for zoom
+                const bgX = -xPct * targetImg.naturalWidth * zoom + magSize / 2;
+                const bgY = -yPct * targetImg.naturalHeight * zoom + magSize / 2;
+
+                targetMag.style.backgroundImage = `url(${targetImg.src})`;
+                targetMag.style.backgroundSize = `${targetImg.naturalWidth * zoom}px ${targetImg.naturalHeight * zoom}px`;
+                targetMag.style.backgroundPosition = `${bgX}px ${bgY}px`;
+                targetMag.style.opacity = '1';
+            });
         });
 
-        newContainer.addEventListener('mouseenter', () => {
-            newMag.style.opacity = '1';
-        });
-
-        newContainer.addEventListener('mouseleave', () => {
-            newMag.style.opacity = '0';
+        container.addEventListener('mouseleave', () => {
+            // Hide ALL magnifiers
+            newMags.forEach(mag => {
+                if (mag) mag.style.opacity = '0';
+            });
         });
     });
 }
