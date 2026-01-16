@@ -270,7 +270,7 @@ function setupSyncedMagnifiers() {
         document.getElementById('mag-model-b')
     ];
 
-    const magSize = 180;
+    const magSize = 360;
     const zoom = 3;
 
     containers.forEach((container, idx) => {
