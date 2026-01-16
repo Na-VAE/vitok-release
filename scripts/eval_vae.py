@@ -61,6 +61,7 @@ def evaluate(
     metrics: tuple[str, ...] = ("fid", "fdd", "ssim", "psnr"),
     compile: bool = True,
     float8_mode: str | None = None,
+    attn_backend: str = "flex",
     device: torch.device | None = None,
     dtype: torch.dtype | None = None,
     verbose: bool = True,
@@ -137,11 +138,11 @@ def evaluate(
             config["sw"] = swa_window
 
         # Create models (float8 auto-applied on load_state_dict)
-        encoder = AE(**config, decoder=False, float8_mode=float8_mode).to(device=device, dtype=dtype)
+        encoder = AE(**config, decoder=False, float8_mode=float8_mode, attn_backend=attn_backend).to(device=device, dtype=dtype)
         encoder.load_state_dict(encoder_weights)
         encoder.eval()
 
-        decoder = AE(**config, encoder=False, float8_mode=float8_mode).to(device=device, dtype=dtype)
+        decoder = AE(**config, encoder=False, float8_mode=float8_mode, attn_backend=attn_backend).to(device=device, dtype=dtype)
         decoder.load_state_dict(decoder_weights)
         decoder.eval()
 
@@ -353,6 +354,7 @@ def main():
     parser.add_argument("--metrics", nargs="+", default=["fid", "fdd", "ssim", "psnr"], help="Metrics to compute")
     parser.add_argument("--no-compile", action="store_true", help="Disable torch.compile")
     parser.add_argument("--float8", choices=["inference", "training"], default=None)
+    parser.add_argument("--attn-backend", choices=["flex", "flash", "sdpa"], default="flex", help="Attention backend")
     parser.add_argument("--save-visuals", type=int, default=0, help="Number of sample images to save")
     parser.add_argument("--output-dir", default=None, help="Directory to save visuals")
     parser.add_argument("--output-json", default=None, help="Save results to JSON file")
@@ -372,6 +374,7 @@ def main():
         metrics=tuple(args.metrics),
         compile=not args.no_compile,
         float8_mode=args.float8,
+        attn_backend=args.attn_backend,
         device=device,
         verbose=(rank == 0),
         save_visuals=args.save_visuals if rank == 0 else 0,
@@ -401,6 +404,7 @@ def run_eval_remote(
     metrics: list[str] | None = None,
     no_compile: bool = False,
     float8: str | None = None,
+    attn_backend: str = "flex",
     save_visuals: int = 0,
     output_dir: str | None = None,
 ) -> dict:
@@ -423,6 +427,7 @@ def run_eval_remote(
         metrics=tuple(metrics or ["fid", "fdd", "ssim", "psnr"]),
         compile=not no_compile,
         float8_mode=float8,
+        attn_backend=attn_backend,
         save_visuals=save_visuals,
         output_dir=output_dir or ("/output/eval" if save_visuals > 0 else None),
     )
@@ -441,6 +446,7 @@ def modal_main(
     metrics: str = "fid,fdd,ssim,psnr",
     no_compile: bool = False,
     float8: str = None,
+    attn_backend: str = "flex",
     save_visuals: int = 0,
     output_dir: str = None,
     output_json: str = None,
@@ -461,6 +467,7 @@ def modal_main(
         metrics=metrics.split(","),
         no_compile=no_compile,
         float8=float8,
+        attn_backend=attn_backend,
         save_visuals=save_visuals,
         output_dir=output_dir,
     )
