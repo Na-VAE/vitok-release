@@ -214,44 +214,67 @@ def resize_to_token_budget(patch: int, max_tokens: int):
     return _resize
 
 
-def patchify(patch: int = 16, max_tokens: int = 256):
-    """Convert tensor to patch dictionary.
+def patchify(patch: int = 16, temporal_patch: int = 1, max_tokens: int = 256):
+    """Convert image/video tensor to patch dictionary.
 
-    Pads to patch boundary and unfolds to patches. Does NOT resize - use
-    resize_to_token_budget() before patchify() if resizing is needed.
+    Unified patchification for both images and videos. Images are treated as
+    single-frame videos (T=1). Pads to patch boundaries and creates tubelets.
 
     Args:
-        patch: Patch size in pixels
+        patch: Spatial patch size in pixels
+        temporal_patch: Temporal patch size in frames (1 for images, >1 for video)
         max_tokens: Maximum number of patches (for padding output)
 
-    Input: Tensor (C, H, W) - normalized
-    Output: Dict with patches, patch_mask, row_idx, col_idx, attention_mask, etc.
-    """
-    def _patchify(img: torch.Tensor) -> dict:
-        c, h, w = img.shape
-        orig_h, orig_w = h, w
+    Input:
+        - Image: Tensor (C, H, W) → treated as (1, C, H, W)
+        - Video: Tensor (T, C, H, W)
 
-        # Step 1: Pad to patch boundary
+    Output: Dict with patches, patch_mask, time_idx, row_idx, col_idx, etc.
+
+    When temporal_patch=1: equivalent to current 2D patchify (backwards compat)
+    When temporal_patch>1: creates 3D tubelets for video
+    """
+    def _patchify(x: torch.Tensor) -> dict:
+        # Handle both (C, H, W) and (T, C, H, W) inputs
+        if x.ndim == 3:
+            x = x.unsqueeze(0)  # (C, H, W) → (1, C, H, W)
+
+        t, c, h, w = x.shape
+        orig_t, orig_h, orig_w = t, h, w
+
+        # Step 1: Pad to temporal and spatial boundaries
+        pad_t = (temporal_patch - t % temporal_patch) % temporal_patch
         pad_h = (patch - h % patch) % patch
         pad_w = (patch - w % patch) % patch
-        if pad_h > 0 or pad_w > 0:
-            img = F.pad(img, (0, pad_w, 0, pad_h), mode='constant', value=0.0)
 
-        # Step 2: Unfold to patches
-        c, h_padded, w_padded = img.shape
-        patches = F.unfold(img.unsqueeze(0), kernel_size=patch, stride=patch)
-        patches = patches.squeeze(0).T  # (N, C*patch*patch)
+        if pad_t > 0 or pad_h > 0 or pad_w > 0:
+            # Pad format: (left, right, top, bottom, front, back)
+            x = F.pad(x, (0, pad_w, 0, pad_h, 0, 0, 0, pad_t), mode='constant', value=0.0)
 
-        grid_rows = h_padded // patch
-        grid_cols = w_padded // patch
-        n_patches = grid_rows * grid_cols
+        t_padded, c, h_padded, w_padded = x.shape
 
-        # Step 3: Generate spatial indices
-        y_coords, x_coords = torch.meshgrid(
-            torch.arange(grid_rows),
-            torch.arange(grid_cols),
+        # Step 2: Reshape to tubelets
+        grid_t = t_padded // temporal_patch
+        grid_h = h_padded // patch
+        grid_w = w_padded // patch
+
+        # Reshape: (T, C, H, W) → (grid_t, temporal_patch, C, grid_h, patch, grid_w, patch)
+        x = x.reshape(grid_t, temporal_patch, c, grid_h, patch, grid_w, patch)
+        # Permute to: (grid_t, grid_h, grid_w, temporal_patch, C, patch, patch)
+        x = x.permute(0, 3, 5, 1, 2, 4, 6)
+        # Flatten tubelet: (grid_t * grid_h * grid_w, temporal_patch * C * patch * patch)
+        patches = x.reshape(-1, temporal_patch * c * patch * patch)
+
+        n_patches = grid_t * grid_h * grid_w
+
+        # Step 3: Generate 3D indices
+        t_coords, y_coords, x_coords = torch.meshgrid(
+            torch.arange(grid_t),
+            torch.arange(grid_h),
+            torch.arange(grid_w),
             indexing='ij'
         )
+        time_idx = t_coords.flatten()
         row_idx = y_coords.flatten()
         col_idx = x_coords.flatten()
 
@@ -262,24 +285,27 @@ def patchify(patch: int = 16, max_tokens: int = 256):
         patch_mask = torch.zeros(max_tokens, dtype=torch.bool)
         patch_mask[:n_patches] = True
 
+        time_idx_full = torch.zeros(max_tokens, dtype=torch.long)
+        time_idx_full[:n_patches] = time_idx
+
         row_idx_full = torch.zeros(max_tokens, dtype=torch.long)
         row_idx_full[:n_patches] = row_idx
 
         col_idx_full = torch.zeros(max_tokens, dtype=torch.long)
         col_idx_full[:n_patches] = col_idx
 
-        time_idx = torch.zeros(max_tokens, dtype=torch.long)
-
         return {
             'patches': patches_full,
             'patch_mask': patch_mask,
+            'time_idx': time_idx_full,
             'row_idx': row_idx_full,
             'col_idx': col_idx_full,
-            'time_idx': time_idx,
+            'orig_frames': torch.tensor(orig_t, dtype=torch.long),
             'orig_height': torch.tensor(orig_h, dtype=torch.long),
             'orig_width': torch.tensor(orig_w, dtype=torch.long),
-            'grid_rows': torch.tensor(grid_rows, dtype=torch.long),
-            'grid_cols': torch.tensor(grid_cols, dtype=torch.long),
+            'grid_t': torch.tensor(grid_t, dtype=torch.long),
+            'grid_rows': torch.tensor(grid_h, dtype=torch.long),
+            'grid_cols': torch.tensor(grid_w, dtype=torch.long),
         }
 
     return _patchify
@@ -295,20 +321,26 @@ from typing import Optional, List
 def unpatchify(
     patch_dict: dict,
     patch: int = 16,
+    temporal_patch: int = 1,
     max_grid_size: Optional[int] = None,
 ) -> torch.Tensor:
-    """Convert patches back to image tensor.
+    """Convert patches back to image/video tensor.
+
+    Unified unpatchification for both images and videos. Inverse of patchify().
 
     Args:
-        patch_dict: Dictionary with patches, patch_mask, row_idx, col_idx
-        patch: Patch size
-        max_grid_size: Optional max grid size
+        patch_dict: Dictionary with patches, patch_mask, time_idx, row_idx, col_idx
+        patch: Spatial patch size
+        temporal_patch: Temporal patch size (1 for images)
+        max_grid_size: Optional max spatial grid size
 
     Returns:
-        Image tensor (B, C, H, W)
+        - Image: tensor (B, C, H, W) when grid_t=1
+        - Video: tensor (B, T, C, H, W) when grid_t>1
     """
     patches = patch_dict['patches']
     mask = patch_dict['patch_mask']
+    time = patch_dict['time_idx']
     row = patch_dict['row_idx']
     col = patch_dict['col_idx']
 
@@ -316,23 +348,61 @@ def unpatchify(
     C = 3
 
     valid_mask = mask.bool()
+
+    # Determine grid dimensions
     if max_grid_size is None:
-        max_y = row[valid_mask].max().item() + 1
-        max_x = col[valid_mask].max().item() + 1
+        max_t = time[valid_mask].max().item() + 1 if valid_mask.any() else 1
+        max_y = row[valid_mask].max().item() + 1 if valid_mask.any() else 1
+        max_x = col[valid_mask].max().item() + 1 if valid_mask.any() else 1
     else:
+        max_t = time[valid_mask].max().item() + 1 if valid_mask.any() else 1
         max_y = max_grid_size
         max_x = max_grid_size
 
+    # Handle 2D (image) case with simple fold
+    if max_t == 1 and temporal_patch == 1:
+        patches = patches.masked_fill(~mask.unsqueeze(-1), 0.0)
+        patches = patches.transpose(1, 2)
+        flat_idx = row * max_x + col
+
+        tokens = torch.zeros(B, C * patch * patch, max_y * max_x, dtype=patches.dtype, device=patches.device)
+        tokens = tokens.scatter(2, flat_idx.unsqueeze(1).expand(-1, C * patch * patch, -1), patches)
+        first_idx = torch.zeros(B, C * patch * patch, 1, dtype=torch.long, device=patches.device)
+        tokens = tokens.scatter(2, first_idx, patches[:, :, 0:1])
+
+        return F.fold(tokens, output_size=(max_y * patch, max_x * patch), kernel_size=patch, stride=patch)
+
+    # Handle 3D (video) case
     patches = patches.masked_fill(~mask.unsqueeze(-1), 0.0)
-    patches = patches.transpose(1, 2)
-    flat_idx = row * max_x + col
 
-    tokens = torch.zeros(B, C * patch * patch, max_y * max_x, dtype=patches.dtype, device=patches.device)
-    tokens = tokens.scatter(2, flat_idx.unsqueeze(1).expand(-1, C * patch * patch, -1), patches)
-    first_idx = torch.zeros(B, C * patch * patch, 1, dtype=torch.long, device=patches.device)
-    tokens = tokens.scatter(2, first_idx, patches[:, :, 0:1])
+    # Reshape patches back to tubelet form
+    # patches: (B, N, temporal_patch * C * patch * patch)
+    tubelet_dim = temporal_patch * C * patch * patch
+    patches = patches.reshape(B, N, temporal_patch, C, patch, patch)
 
-    return F.fold(tokens, output_size=(max_y * patch, max_x * patch), kernel_size=patch, stride=patch)
+    # Create output tensor
+    T_out = max_t * temporal_patch
+    H_out = max_y * patch
+    W_out = max_x * patch
+    output = torch.zeros(B, T_out, C, H_out, W_out, dtype=patches.dtype, device=patches.device)
+
+    # Scatter tubelets back to output
+    for b in range(B):
+        for n in range(N):
+            if not mask[b, n]:
+                continue
+            t_idx = time[b, n].item()
+            y_idx = row[b, n].item()
+            x_idx = col[b, n].item()
+
+            t_start = t_idx * temporal_patch
+            y_start = y_idx * patch
+            x_start = x_idx * patch
+
+            output[b, t_start:t_start + temporal_patch, :,
+                   y_start:y_start + patch, x_start:x_start + patch] = patches[b, n]
+
+    return output
 
 
 def unpack(

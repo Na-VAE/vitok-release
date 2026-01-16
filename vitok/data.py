@@ -4,6 +4,7 @@ Supports three data source types:
 - ImageFolder: directory of images (jpg, png, etc.)
 - WebDataset: tar shards (local or hf:// URLs)
 - HuggingFace streaming: stream from HuggingFace datasets
+- Video: MP4/WebM files via WebDataset or folder
 
 Example:
     # WebDataset (tar shards) - auto-detected
@@ -28,6 +29,16 @@ Example:
         num_samples=1000,
     )
 
+    # Video WebDataset
+    loader = create_dataloader(
+        source="hf://org/video-dataset/videos-{0000..0099}.tar",
+        pp="to_tensor|normalize(minus_one_to_one)|patchify(16, 2, 256)",
+        batch_size=8,
+        video_mode=True,
+        max_frames=16,
+        frame_stride=1,
+    )
+
 Note on drop_last behavior:
 - ImageFolder: respects drop_last parameter
 - WebDataset: always drops incomplete batches (partial=False is hardcoded)
@@ -36,6 +47,7 @@ Note on drop_last behavior:
 
 from __future__ import annotations
 
+import io
 import random
 import re
 import warnings
@@ -49,6 +61,15 @@ import webdataset as wds
 from PIL import Image, ImageOps
 
 from vitok.pp import build_transform
+
+# Optional video decoding
+try:
+    import decord
+    decord.bridge.set_bridge('torch')
+    DECORD_AVAILABLE = True
+except ImportError:
+    decord = None
+    DECORD_AVAILABLE = False
 
 
 class DataSourceType(Enum):
@@ -92,6 +113,50 @@ def patch_collate_fn(batch):
         else:
             collated[k] = items
     return collated
+
+
+def decode_video(
+    video_bytes: bytes,
+    max_frames: int = 16,
+    frame_stride: int = 1,
+) -> torch.Tensor:
+    """Decode video to tensor using decord.
+
+    Args:
+        video_bytes: Raw video file bytes (MP4, WebM, etc.)
+        max_frames: Maximum number of frames to sample
+        frame_stride: Sample every Nth frame
+
+    Returns:
+        Tensor of shape (T, C, H, W) where T <= max_frames, values in [0, 1]
+    """
+    if not DECORD_AVAILABLE:
+        raise ImportError("decord is required for video loading. Install with: pip install decord")
+
+    vr = decord.VideoReader(io.BytesIO(video_bytes), num_threads=4)
+    total_frames = len(vr)
+
+    # Sample frames uniformly with stride
+    indices = list(range(0, total_frames, frame_stride))[:max_frames]
+
+    if len(indices) == 0:
+        indices = [0]  # At least get one frame
+
+    # Get batch of frames: (T, H, W, C) in uint8
+    frames = vr.get_batch(indices)
+
+    # Convert to (T, C, H, W) float32 in [0, 1]
+    frames = frames.permute(0, 3, 1, 2).float() / 255.0
+
+    return frames
+
+
+def video_collate_fn(batch):
+    """Collate video patch dicts into batched tensors.
+
+    Same as patch_collate_fn but handles video-specific keys.
+    """
+    return patch_collate_fn(batch)
 
 
 def _decode_label(value):
@@ -227,6 +292,79 @@ def _create_hf_streaming_loader(
     return batch_iterator()
 
 
+def _create_video_webdataset_loader(
+    source: str,
+    pp: str,
+    batch_size: int,
+    num_workers: int,
+    seed: int,
+    shuffle_buffer: int,
+    max_frames: int,
+    frame_stride: int,
+):
+    """Create a WebDataset loader for video files.
+
+    Args:
+        source: WebDataset source (hf:// URL or local path)
+        pp: Preprocessing string for video tensors (T, C, H, W)
+        batch_size: Batch size
+        num_workers: DataLoader workers
+        seed: Random seed
+        shuffle_buffer: Shuffle buffer size
+        max_frames: Maximum frames per video
+        frame_stride: Sample every Nth frame
+
+    Returns:
+        WebLoader yielding batched video patch dicts
+    """
+    transform = build_transform(pp)
+    urls = _resolve_source(source, seed)
+
+    # Per-rank shuffle seed
+    rank = dist.get_rank() if dist.is_initialized() else 0
+    shuffle_seed = seed + rank
+
+    def _decode_and_transform(sample):
+        """Decode video and apply transform."""
+        # Try different video extensions
+        video_bytes = None
+        for ext in ('mp4', 'webm', 'avi', 'mov', 'mkv'):
+            if ext in sample:
+                video_bytes = sample[ext]
+                break
+
+        if video_bytes is None:
+            raise ValueError(f"No video file found in sample. Keys: {list(sample.keys())}")
+
+        # Decode video to (T, C, H, W) tensor
+        frames = decode_video(video_bytes, max_frames=max_frames, frame_stride=frame_stride)
+
+        # Apply transform (expects tensor input)
+        transformed = transform(frames)
+
+        # Handle both tensor and dict outputs
+        if isinstance(transformed, dict):
+            transformed["label"] = -1
+            return transformed
+        else:
+            return {"video": transformed, "label": -1}
+
+    dataset = (
+        wds.WebDataset(urls, resampled=True, handler=wds.ignore_and_continue)
+        .shuffle(shuffle_buffer, seed=shuffle_seed)
+        .map(_decode_and_transform, handler=wds.ignore_and_continue)
+        .batched(batch_size, partial=False, collation_fn=video_collate_fn)
+    )
+
+    return wds.WebLoader(
+        dataset,
+        batch_size=None,
+        num_workers=num_workers,
+        pin_memory=True,
+        persistent_workers=num_workers > 0,
+    )
+
+
 def create_dataloader(
     source: str,
     pp: str,
@@ -237,6 +375,10 @@ def create_dataloader(
     min_size: Optional[int] = None,
     drop_last: bool = True,
     num_samples: Optional[int] = None,
+    # Video mode parameters
+    video_mode: bool = False,
+    max_frames: int = 16,
+    frame_stride: int = 1,
 ):
     """Create a dataloader from source with preprocessing.
 
@@ -253,6 +395,7 @@ def create_dataloader(
             - "/path/to/image_folder" for a folder of images
         pp: Preprocessing string, e.g.:
             "resize_longest_side(512)|to_tensor|normalize(minus_one_to_one)|patchify(16, 256)"
+            For video: "normalize(minus_one_to_one)|patchify(16, 2, 256)"
         batch_size: Batch size
         num_workers: DataLoader workers
         seed: Random seed (used for shard assignment, must be same across ranks)
@@ -260,10 +403,26 @@ def create_dataloader(
         min_size: Optional minimum image dimension filter (WebDataset only)
         drop_last: Drop last incomplete batch (useful for multi-GPU to ensure consistent batch sizes)
         num_samples: Max samples (required for HF streaming, optional otherwise)
+        video_mode: If True, load video files instead of images
+        max_frames: Maximum frames to sample per video (video_mode only)
+        frame_stride: Sample every Nth frame (video_mode only)
 
     Returns:
         DataLoader yielding batch dicts with 'label' key (class label, -1 if unavailable)
     """
+    # Video mode: use video WebDataset loader
+    if video_mode:
+        return _create_video_webdataset_loader(
+            source=source,
+            pp=pp,
+            batch_size=batch_size,
+            num_workers=num_workers,
+            seed=seed,
+            shuffle_buffer=shuffle_buffer,
+            max_frames=max_frames,
+            frame_stride=frame_stride,
+        )
+
     # HuggingFace streaming (auto-detected by source name)
     if source in HF_DATASETS:
         if num_samples is None:
@@ -421,6 +580,9 @@ __all__ = [
     "create_dataloader",
     "ImageFolderDataset",
     "patch_collate_fn",
+    "video_collate_fn",
+    "decode_video",
     "to_rgb",
     "HF_DATASETS",
+    "DECORD_AVAILABLE",
 ]

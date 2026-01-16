@@ -145,14 +145,16 @@ class Attention(nn.Module):
         sliding_window: Optional[int] = None,
         score_mod=None,
         block_mask=None,
+        grid_info: Optional[Dict[str, int]] = None,
     ):
         """
         Args:
             hidden_states: [B, N, C] where N = num_special_tokens + patch_len
             freqs_cis: RoPE (cos, sin) tuple
-            sliding_window: Window radius for 2D local attention (None = full attention)
+            sliding_window: Window radius for local attention (None = full attention)
             score_mod: Optional score modification function for padding masks
             block_mask: Pre-computed block mask for SWA (for torch.compile fullgraph)
+            grid_info: Optional dict with grid_t, grid_h, grid_w for 3D SWA sizing
         """
         B, N, C = hidden_states.shape
 
@@ -172,7 +174,7 @@ class Attention(nn.Module):
 
         # Select attention backend
         if self.backend == "flash":
-            attn = self._flash_attention(q, k, v, sliding_window)
+            attn = self._flash_attention(q, k, v, sliding_window, grid_info)
         elif self.backend == "flex":
             attn = self._flex_attention(q, k, v, sliding_window, score_mod, block_mask, N)
         else:  # sdpa
@@ -181,12 +183,20 @@ class Attention(nn.Module):
         attn = attn.transpose(1, 2).reshape(B, N, C)
         return self.out_proj(attn)
 
-    def _flash_attention(self, q, k, v, sliding_window):
-        """Flash Attention with 1D sliding window.
+    def _flash_attention(self, q, k, v, sliding_window, grid_info=None):
+        """Flash Attention with adaptive 1D sliding window for 2D/3D locality.
 
-        Note: 1D SWA only captures horizontal neighbors in raster order.
-        For 256x256 patches, vertical neighbors are 256 tokens apart.
-        Use window >= grid_width for vertical coverage.
+        For images (2D): Uses sliding_window directly.
+        For video (3D): Scales window to cover spatial plane + temporal neighbors.
+
+        Tokens are arranged in raster order: (t=0,r=0,c=0), (t=0,r=0,c=1), ...
+        - Spatial neighbors within same frame: need window >= grid_w
+        - Temporal neighbors: need window >= grid_h * grid_w
+
+        Args:
+            q, k, v: Query, key, value tensors [B, H, N, D]
+            sliding_window: Base window radius (None = full attention)
+            grid_info: Optional dict with grid_t, grid_h, grid_w for 3D sizing
         """
         # flash_attn expects [B, N, H, D], we have [B, H, N, D]
         q = q.transpose(1, 2).contiguous()
@@ -194,7 +204,16 @@ class Attention(nn.Module):
         v = v.transpose(1, 2).contiguous()
 
         if sliding_window is not None and sliding_window >= 0:
-            window_size = (sliding_window, sliding_window)
+            effective_window = sliding_window
+
+            # For 3D (video): scale window to cover temporal neighborhood
+            if grid_info is not None and grid_info.get('grid_t', 1) > 1:
+                spatial_size = grid_info['grid_h'] * grid_info['grid_w']
+                # Window covers sliding_window rows within each spatial plane
+                # plus temporal neighbors (one spatial_size apart in raster order)
+                effective_window = sliding_window * spatial_size
+
+            window_size = (effective_window, effective_window)
         else:
             window_size = (-1, -1)  # Full attention
 

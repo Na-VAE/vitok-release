@@ -75,6 +75,58 @@ def compute_2d_freqs_cis(
     return freqs_cos, freqs_sin
 
 
+def compute_rope_freqs(
+    t_positions: torch.Tensor,
+    y_positions: torch.Tensor,
+    x_positions: torch.Tensor,
+    dim: int,
+    theta: float = 10000.0,
+    axis_inv_freq: Optional[torch.Tensor] = None,
+):
+    """Unified RoPE for 2D/3D positions.
+
+    For images (t=0 for all tokens): temporal frequencies contribute nothing,
+    reducing to 2D RoPE behavior.
+    For video (t>0): full 3D positional encoding.
+
+    Dimension split: t:y:x = 1:1:2 for head_dim=64 compatibility
+        - t_dim = dim // 4
+        - y_dim = dim // 4
+        - x_dim = dim // 2
+
+    Args:
+        t_positions: [B, N] temporal indices (0 for images)
+        y_positions: [B, N] row indices
+        x_positions: [B, N] col indices
+        dim: Head dimension (must be divisible by 4)
+        theta: RoPE base frequency
+        axis_inv_freq: Optional precomputed inverse frequencies
+
+    Returns:
+        (freqs_cos, freqs_sin): Concatenated frequencies for all axes
+    """
+    if not (y_positions.shape == x_positions.shape == t_positions.shape):
+        raise ValueError("All position tensors must have matching shapes")
+    if dim % 4 != 0:
+        raise ValueError("3D RoPE requires head dimension divisible by 4")
+
+    # 1:1:2 split for t:y:x
+    t_dim = dim // 4
+    y_dim = dim // 4
+    x_dim = dim // 2
+
+    # Compute frequencies for each axis
+    cos_t, sin_t = _compute_axis_freqs(t_positions, t_dim, theta, inv_freq=axis_inv_freq)
+    cos_y, sin_y = _compute_axis_freqs(y_positions, y_dim, theta, inv_freq=axis_inv_freq)
+    cos_x, sin_x = _compute_axis_freqs(x_positions, x_dim, theta, inv_freq=axis_inv_freq)
+
+    # Concatenate: [t_dim/2, y_dim/2, x_dim/2] pairs = dim/2 total pairs
+    freqs_cos = torch.cat((cos_t, cos_y, cos_x), dim=-1)
+    freqs_sin = torch.cat((sin_t, sin_y, sin_x), dim=-1)
+
+    return freqs_cos, freqs_sin
+
+
 def reshape_for_broadcast(freqs_cis: torch.Tensor, x: torch.Tensor):
     """Reshape frequency tensor for broadcasting with input."""
     ndim = x.ndim

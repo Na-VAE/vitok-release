@@ -9,7 +9,7 @@ from vitok.models.modules.mlp import SwiGLU
 from vitok.models.modules.layerscale import LayerScale
 from vitok.models.modules.attention import Attention, create_2d_block_mask
 from vitok.models.modules.norm import RMSNorm, LayerNorm
-from vitok.models.modules.rotary_embedding import compute_2d_freqs_cis
+from vitok.models.modules.rotary_embedding import compute_rope_freqs
 
 from typing import Literal
 
@@ -112,6 +112,7 @@ class Block(nn.Module):
         freqs_cis: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
         score_mod=None,
         block_mask=None,
+        grid_info: Optional[Dict[str, int]] = None,
     ) -> torch.Tensor:
         h = self.norm1(x)
         attn_out = self.attn(
@@ -120,6 +121,7 @@ class Block(nn.Module):
             score_mod=score_mod,
             sliding_window=self.sliding_window,
             block_mask=block_mask,
+            grid_info=grid_info,
         )
         mlp_out = self.ffn(h)
         combined = self.layer_scale(attn_out + mlp_out)
@@ -289,12 +291,23 @@ class AE(nn.Module):
         device: torch.device,
         batch_size: int,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Compute 3D RoPE frequencies from patch dict.
+
+        Uses unified 3D RoPE (t:y:x = 1:1:2 split). For images, time_idx=0
+        for all tokens, which gives equivalent behavior to 2D RoPE.
+        """
         # Support both old and new key names
+        time = patch_dict.get('time_idx', torch.zeros(1))
         row = patch_dict.get('row_idx', patch_dict.get('yidx'))
         col = patch_dict.get('col_idx', patch_dict.get('xidx'))
+
+        time = time.to(device=device, dtype=torch.float32)
         row = row.to(device=device, dtype=torch.float32)
         col = col.to(device=device, dtype=torch.float32)
-        freqs_cos, freqs_sin = compute_2d_freqs_cis(row, col, head_dim, self.rope_theta)
+
+        # Use unified 3D RoPE - for images, time=0 gives consistent behavior
+        freqs_cos, freqs_sin = compute_rope_freqs(time, row, col, head_dim, self.rope_theta)
+
         S = self.num_special_tokens
         if S > 0:
             rope_dim = freqs_cos.shape[-1]
@@ -303,6 +316,18 @@ class AE(nn.Module):
             freqs_cos = torch.cat([ones, freqs_cos], dim=1)
             freqs_sin = torch.cat([zeros, freqs_sin], dim=1)
         return freqs_cos.float(), freqs_sin.float()
+
+    def _get_grid_info(self, patch_dict: Dict[str, torch.Tensor]) -> Dict[str, int]:
+        """Extract grid info from patch dict for 3D SWA sizing."""
+        grid_t = patch_dict.get('grid_t', torch.tensor(1))
+        grid_h = patch_dict.get('grid_rows', torch.tensor(1))
+        grid_w = patch_dict.get('grid_cols', torch.tensor(1))
+
+        return {
+            'grid_t': grid_t.item() if isinstance(grid_t, torch.Tensor) else grid_t,
+            'grid_h': grid_h.item() if isinstance(grid_h, torch.Tensor) else grid_h,
+            'grid_w': grid_w.item() if isinstance(grid_w, torch.Tensor) else grid_w,
+        }
 
     def encode(self, patch_dict: Dict[str, torch.Tensor]):
         """Encode patches to latent codes."""
@@ -327,6 +352,9 @@ class AE(nn.Module):
             device=x.device, batch_size=B,
         )
 
+        # Extract grid info for 3D SWA sizing
+        grid_info = self._get_grid_info(patch_dict)
+
         score_mod = None
         attn_mask = patch_dict.get('attention_mask')
         if attn_mask is not None:
@@ -334,9 +362,9 @@ class AE(nn.Module):
 
         for i, block in enumerate(self.encoder_blocks):
             if self._should_checkpoint(i):
-                x = _checkpoint(lambda _x: block(_x, freqs_cis=freqs_cis, score_mod=score_mod, block_mask=self._block_mask), x, use_reentrant=False)
+                x = _checkpoint(lambda _x: block(_x, freqs_cis=freqs_cis, score_mod=score_mod, block_mask=self._block_mask, grid_info=grid_info), x, use_reentrant=False)
             else:
-                x = block(x, freqs_cis=freqs_cis, score_mod=score_mod, block_mask=self._block_mask)
+                x = block(x, freqs_cis=freqs_cis, score_mod=score_mod, block_mask=self._block_mask, grid_info=grid_info)
 
         if self.num_special_tokens > 0:
             x = x[:, self.num_special_tokens:]
@@ -347,10 +375,15 @@ class AE(nn.Module):
 
         # Build output with new key names (support old names for reading)
         mask = patch_dict.get('patch_mask', patch_dict.get('ptype'))
+        time = patch_dict.get('time_idx')
         row = patch_dict.get('row_idx', patch_dict.get('yidx'))
         col = patch_dict.get('col_idx', patch_dict.get('xidx'))
+        orig_t = patch_dict.get('orig_frames')
         orig_h = patch_dict.get('orig_height', patch_dict.get('original_height'))
         orig_w = patch_dict.get('orig_width', patch_dict.get('original_width'))
+        grid_t = patch_dict.get('grid_t')
+        grid_rows = patch_dict.get('grid_rows')
+        grid_cols = patch_dict.get('grid_cols')
 
         encode_dict = {
             'patch_mask': mask,
@@ -360,6 +393,17 @@ class AE(nn.Module):
             'orig_width': orig_w,
             'z': z,
         }
+        # Include temporal info if present
+        if time is not None:
+            encode_dict['time_idx'] = time
+        if orig_t is not None:
+            encode_dict['orig_frames'] = orig_t
+        if grid_t is not None:
+            encode_dict['grid_t'] = grid_t
+        if grid_rows is not None:
+            encode_dict['grid_rows'] = grid_rows
+        if grid_cols is not None:
+            encode_dict['grid_cols'] = grid_cols
         if 'attention_mask' in patch_dict:
             encode_dict['attention_mask'] = patch_dict['attention_mask']
         return encode_dict
@@ -387,6 +431,9 @@ class AE(nn.Module):
             device=x.device, batch_size=B,
         )
 
+        # Extract grid info for 3D SWA sizing
+        grid_info = self._get_grid_info(encode_dict)
+
         score_mod = None
         attn_mask = encode_dict.get('attention_mask')
         if attn_mask is not None:
@@ -394,9 +441,9 @@ class AE(nn.Module):
 
         for i, block in enumerate(self.decoder_blocks):
             if self._should_checkpoint(i):
-                x = _checkpoint(lambda _x: block(_x, freqs_cis=freqs_cis, score_mod=score_mod, block_mask=self._block_mask), x, use_reentrant=False)
+                x = _checkpoint(lambda _x: block(_x, freqs_cis=freqs_cis, score_mod=score_mod, block_mask=self._block_mask, grid_info=grid_info), x, use_reentrant=False)
             else:
-                x = block(x, freqs_cis=freqs_cis, score_mod=score_mod, block_mask=self._block_mask)
+                x = block(x, freqs_cis=freqs_cis, score_mod=score_mod, block_mask=self._block_mask, grid_info=grid_info)
 
         if self.num_special_tokens > 0:
             x = x[:, self.num_special_tokens:]
@@ -405,10 +452,15 @@ class AE(nn.Module):
 
         # Build output with new key names (support old names for reading)
         mask = encode_dict.get('patch_mask', encode_dict.get('ptype'))
+        time = encode_dict.get('time_idx')
         row = encode_dict.get('row_idx', encode_dict.get('yidx'))
         col = encode_dict.get('col_idx', encode_dict.get('xidx'))
+        orig_t = encode_dict.get('orig_frames')
         orig_h = encode_dict.get('orig_height', encode_dict.get('original_height'))
         orig_w = encode_dict.get('orig_width', encode_dict.get('original_width'))
+        grid_t = encode_dict.get('grid_t')
+        grid_rows = encode_dict.get('grid_rows')
+        grid_cols = encode_dict.get('grid_cols')
 
         decode_dict = {
             'patch_mask': mask,
@@ -416,10 +468,21 @@ class AE(nn.Module):
             'col_idx': col,
             'patches': pred_patches,
         }
+        # Include temporal info if present
+        if time is not None:
+            decode_dict['time_idx'] = time
+        if orig_t is not None:
+            decode_dict['orig_frames'] = orig_t
         if orig_h is not None:
             decode_dict['orig_height'] = orig_h
         if orig_w is not None:
             decode_dict['orig_width'] = orig_w
+        if grid_t is not None:
+            decode_dict['grid_t'] = grid_t
+        if grid_rows is not None:
+            decode_dict['grid_rows'] = grid_rows
+        if grid_cols is not None:
+            decode_dict['grid_cols'] = grid_cols
         if 'attention_mask' in encode_dict:
             decode_dict['attention_mask'] = encode_dict['attention_mask']
         return decode_dict

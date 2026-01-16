@@ -48,6 +48,16 @@ def main():
     parser.add_argument("--patch_size", type=int, default=16)
     parser.add_argument("--max_tokens", type=int, default=256)
 
+    # Video mode
+    parser.add_argument("--video", action="store_true",
+                        help="Enable video training mode")
+    parser.add_argument("--max_frames", type=int, default=16,
+                        help="Maximum frames to sample per video")
+    parser.add_argument("--temporal_patch", type=int, default=2,
+                        help="Temporal patch size (frames per tubelet)")
+    parser.add_argument("--frame_stride", type=int, default=1,
+                        help="Sample every Nth frame from video")
+
     # Model
     parser.add_argument("--variant", type=str, default="Ld2-Ld22/1x16x64",
                         help="AE variant (e.g., B/1x16x64, Ld2-Ld22/1x16x64)")
@@ -239,20 +249,34 @@ def train(args):
     # Create dataloader (on ALL ranks)
     if rank == 0:
         print(f"Loading data from: {args.data}")
+        if args.video:
+            print(f"Video mode: max_frames={args.max_frames}, temporal_patch={args.temporal_patch}")
 
-    # Build preprocessing string: 25% square crop, 75% native aspect ratio
-    pp_string = (
-        f"random_choice(ops=['random_resized_crop({args.max_size})', 'identity'], probs=[0.25, 0.75])|"
-        f"flip|"
-        f"to_tensor|"
-        f"normalize(minus_one_to_one)|"
-        f"resize_to_token_budget({args.patch_size}, {args.max_tokens})|"
-        f"patchify({args.patch_size}, {args.max_tokens})"
-    )
+    # Build preprocessing string
+    if args.video:
+        # Video mode: already decoded to tensor by data loader
+        # Note: resize operations for video not yet implemented, assumes frames fit token budget
+        pp_string = (
+            f"normalize(minus_one_to_one)|"
+            f"patchify({args.patch_size}, {args.temporal_patch}, {args.max_tokens})"
+        )
+    else:
+        # Image mode: 25% square crop, 75% native aspect ratio
+        pp_string = (
+            f"random_choice(ops=['random_resized_crop({args.max_size})', 'identity'], probs=[0.25, 0.75])|"
+            f"flip|"
+            f"to_tensor|"
+            f"normalize(minus_one_to_one)|"
+            f"resize_to_token_budget({args.patch_size}, {args.max_tokens})|"
+            f"patchify({args.patch_size}, 1, {args.max_tokens})"
+        )
 
     loader = create_dataloader(
         source=args.data, pp=pp_string, batch_size=args.batch_size,
         num_workers=args.num_workers, seed=args.seed,
+        video_mode=args.video,
+        max_frames=args.max_frames,
+        frame_stride=args.frame_stride,
     )
 
     # Perceptual losses
