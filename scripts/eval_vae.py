@@ -61,7 +61,7 @@ def evaluate(
     metrics: tuple[str, ...] = ("fid", "fdd", "ssim", "psnr"),
     compile: bool = True,
     float8_mode: str | None = None,
-    attn_backend: str = "flex",
+    attn_backend: str = "flash",
     device: torch.device | None = None,
     dtype: torch.dtype | None = None,
     verbose: bool = True,
@@ -111,9 +111,10 @@ def evaluate(
     # ==========================================================================
     if is_baseline:
         from scripts.eval.baselines import BaselineVAE
-        vae = BaselineVAE(baseline, device=device, dtype=dtype)
+        do_compile = compile and device.type == "cuda" and not is_distributed
+        vae = BaselineVAE(baseline, device=device, dtype=dtype, compile=do_compile)
         patch_size = 8  # Baselines use 8x compression
-        model_label = f"Baseline: {baseline}"
+        model_label = f"Baseline: {baseline}" + (" (compiled)" if do_compile else "")
         encoder = decoder = None
     else:
         # Resolve ViTok model and variant
@@ -158,13 +159,17 @@ def evaluate(
         print(f"Evaluating: {data} at {max_size}px ({crop_style})")
 
     # ==========================================================================
-    # Compile (ViTok only)
+    # Compile and Warmup
     # ==========================================================================
-    do_compile = False
+    do_compile = compile and device.type == "cuda" and not is_distributed
     encoder_flops = decoder_flops = 0
 
-    if not is_baseline:
-        do_compile = compile and device.type == "cuda" and not is_distributed
+    if is_baseline:
+        # Baseline warmup (compilation done in BaselineVAE.__init__)
+        if do_compile:
+            vae.warmup(size=max_size)
+    else:
+        # ViTok compile and warmup
         if do_compile:
             encoder = torch.compile(encoder)
             decoder = torch.compile(decoder)
@@ -194,7 +199,12 @@ def evaluate(
     # ==========================================================================
     if is_baseline:
         # Simple preprocessing (images in [0, 1])
-        pp = f"resize_longest_side({max_size})|center_crop({max_size})|to_tensor"
+        # Native: resize only, let BaselineVAE handle padding to 8
+        # ADM: center crop to square
+        if crop_style == "native":
+            pp = f"resize_longest_side({max_size})|to_tensor"
+        else:
+            pp = f"resize_longest_side({max_size})|center_crop({max_size})|to_tensor"
         loader = create_dataloader(data, pp, batch_size=batch_size, num_samples=num_samples, drop_last=is_distributed)
     else:
         # ViTok with local data (patchified)
@@ -256,11 +266,11 @@ def evaluate(
         # Update metrics (expects [-1, 1] range)
         metric_calc.update(ref, recon)
 
-        # Collect visuals (convert to [0, 1] for saving)
+        # Collect visuals (convert to [0, 1] float32 for saving)
         if save_visuals > 0 and len(visual_originals) < save_visuals:
             for i in range(min(len(ref), save_visuals - len(visual_originals))):
-                visual_originals.append(((ref[i] + 1.0) / 2.0).clamp(0, 1).cpu())
-                visual_recons.append(((recon[i] + 1.0) / 2.0).clamp(0, 1).cpu())
+                visual_originals.append(((ref[i].float() + 1.0) / 2.0).clamp(0, 1).cpu())
+                visual_recons.append(((recon[i].float() + 1.0) / 2.0).clamp(0, 1).cpu())
 
         samples_seen += batch_size_actual
 
@@ -282,6 +292,7 @@ def evaluate(
 
     if is_baseline:
         stats["baseline"] = baseline
+        stats["compiled"] = do_compile
     else:
         stats["model"] = model_name or checkpoint
         stats["variant"] = variant
@@ -313,11 +324,13 @@ def evaluate(
 
     # Save visuals as tensors (can generate comparison grids later)
     if save_visuals > 0 and output_dir is not None:
-        output_dir = Path(output_dir)
-        output_dir.mkdir(parents=True, exist_ok=True)
-        torch.save({"ref": visual_originals, "recon": visual_recons}, output_dir / "visuals.pt")
+        # Create model-specific subdirectory
+        model_subdir = baseline if is_baseline else model_name
+        visuals_dir = Path(output_dir) / model_subdir
+        visuals_dir.mkdir(parents=True, exist_ok=True)
+        torch.save({"ref": visual_originals, "recon": visual_recons}, visuals_dir / "visuals.pt")
         if verbose:
-            print(f"Saved {len(visual_originals)} visual samples to: {output_dir / 'visuals.pt'}")
+            print(f"Saved {len(visual_originals)} visual samples to: {visuals_dir / 'visuals.pt'}")
 
     return stats
 
@@ -333,6 +346,7 @@ def _print_results(result: dict, model: str, max_size: int, crop_style: str, out
         else:
             print(f"  {k}: {v}")
     if output_json:
+        Path(output_json).parent.mkdir(parents=True, exist_ok=True)
         with open(output_json, "w") as f:
             json.dump(result, f, indent=2)
         print(f"\nSaved to: {output_json}")
@@ -354,7 +368,7 @@ def main():
     parser.add_argument("--metrics", nargs="+", default=["fid", "fdd", "ssim", "psnr"], help="Metrics to compute")
     parser.add_argument("--no-compile", action="store_true", help="Disable torch.compile")
     parser.add_argument("--float8", choices=["inference", "training"], default=None)
-    parser.add_argument("--attn-backend", choices=["flex", "flash", "sdpa"], default="flex", help="Attention backend")
+    parser.add_argument("--attn-backend", choices=["flex", "flash", "sdpa"], default="flash", help="Attention backend")
     parser.add_argument("--save-visuals", type=int, default=0, help="Number of sample images to save")
     parser.add_argument("--output-dir", default=None, help="Directory to save visuals")
     parser.add_argument("--output-json", default=None, help="Save results to JSON file")
@@ -404,7 +418,7 @@ def run_eval_remote(
     metrics: list[str] | None = None,
     no_compile: bool = False,
     float8: str | None = None,
-    attn_backend: str = "flex",
+    attn_backend: str = "flash",
     save_visuals: int = 0,
     output_dir: str | None = None,
 ) -> dict:
@@ -446,7 +460,7 @@ def modal_main(
     metrics: str = "fid,fdd,ssim,psnr",
     no_compile: bool = False,
     float8: str = None,
-    attn_backend: str = "flex",
+    attn_backend: str = "flash",
     save_visuals: int = 0,
     output_dir: str = None,
     output_json: str = None,
