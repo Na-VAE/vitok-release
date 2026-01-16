@@ -60,7 +60,7 @@ def evaluate(
     swa_window: int | None = None,
     metrics: tuple[str, ...] = ("fid", "fdd", "ssim", "psnr"),
     compile: bool = True,
-    float8_mode: str | None = None,
+    float8_mode: str | None = "inference",
     attn_backend: str = "flash",
     device: torch.device | None = None,
     dtype: torch.dtype | None = None,
@@ -80,7 +80,7 @@ def evaluate(
         batch_size: Batch size for evaluation
         num_samples: Number of samples to evaluate
         crop_style: Crop style - "native" (preserve aspect ratio) or "adm_square" (center crop)
-        swa_window: Sliding window attention radius (None=full attention)
+        swa_window: Sliding window attention radius (None=full attention, try 1024 if OOM)
         metrics: Tuple of metrics to compute ("fid", "fdd", "ssim", "psnr")
         compile: Whether to use torch.compile
         float8_mode: Quantization mode - "inference" for FP8/INT8, None for bf16
@@ -169,10 +169,14 @@ def evaluate(
         if do_compile:
             vae.warmup(size=max_size)
     else:
+        # Verify SWA is set correctly
+        if verbose and swa_window is not None:
+            print(f"SWA window: {swa_window} (encoder.sw={encoder.sw}, decoder.sw={decoder.sw})")
+
         # ViTok compile and warmup
         if do_compile:
-            encoder = torch.compile(encoder)
-            decoder = torch.compile(decoder)
+            encoder = torch.compile(encoder, fullgraph=True, mode="max-autotune")
+            decoder = torch.compile(decoder, fullgraph=True, mode="max-autotune")
 
             # Warmup to trigger compilation
             grid_size = max_size // patch_size
@@ -364,10 +368,10 @@ def main():
     parser.add_argument("--batch-size", type=int, default=64, help="Batch size per GPU")
     parser.add_argument("--num-samples", type=int, default=5000, help="Number of samples")
     parser.add_argument("--crop-style", default="native", choices=["native", "adm_square"], help="Crop style")
-    parser.add_argument("--swa-window", type=int, default=None, help="Sliding window attention radius")
+    parser.add_argument("--swa-window", type=int, default=None, help="Sliding window attention radius (try 1024 if OOM)")
     parser.add_argument("--metrics", nargs="+", default=["fid", "fdd", "ssim", "psnr"], help="Metrics to compute")
     parser.add_argument("--no-compile", action="store_true", help="Disable torch.compile")
-    parser.add_argument("--float8", choices=["inference", "training"], default=None)
+    parser.add_argument("--float8", choices=["inference", "training", "none"], default="inference")
     parser.add_argument("--attn-backend", choices=["flex", "flash", "sdpa"], default="flash", help="Attention backend")
     parser.add_argument("--save-visuals", type=int, default=0, help="Number of sample images to save")
     parser.add_argument("--output-dir", default=None, help="Directory to save visuals")
@@ -387,7 +391,7 @@ def main():
         swa_window=args.swa_window,
         metrics=tuple(args.metrics),
         compile=not args.no_compile,
-        float8_mode=args.float8,
+        float8_mode=None if args.float8 == "none" else args.float8,
         attn_backend=args.attn_backend,
         device=device,
         verbose=(rank == 0),
@@ -417,7 +421,7 @@ def run_eval_remote(
     swa_window: int | None = None,
     metrics: list[str] | None = None,
     no_compile: bool = False,
-    float8: str | None = None,
+    float8: str | None = "inference",
     attn_backend: str = "flash",
     save_visuals: int = 0,
     output_dir: str | None = None,
@@ -459,7 +463,7 @@ def modal_main(
     swa_window: int = None,
     metrics: str = "fid,fdd,ssim,psnr",
     no_compile: bool = False,
-    float8: str = None,
+    float8: str = "inference",
     attn_backend: str = "flash",
     save_visuals: int = 0,
     output_dir: str = None,
