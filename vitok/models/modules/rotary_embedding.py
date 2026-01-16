@@ -98,12 +98,18 @@ def apply_rotary_emb(
     freqs_cos: torch.Tensor,
     freqs_sin: torch.Tensor,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    """Apply rotary embeddings to query and key tensors."""
-    xq_r, xq_i = xq.float().reshape(*xq.shape[:-1], -1, 2).unbind(-1)
-    xk_r, xk_i = xk.float().reshape(*xk.shape[:-1], -1, 2).unbind(-1)
+    """Apply rotary embeddings to query and key tensors.
 
-    freqs_cos = reshape_for_broadcast(freqs_cos, xq_r)
-    freqs_sin = reshape_for_broadcast(freqs_sin, xq_r)
+    Note: Rotation is done in the input dtype (bf16) to save memory at high
+    resolutions. Frequency computation uses float32 for numerical stability,
+    but the multiply-add rotation is safe in bf16.
+    """
+    xq_r, xq_i = xq.reshape(*xq.shape[:-1], -1, 2).unbind(-1)
+    xk_r, xk_i = xk.reshape(*xk.shape[:-1], -1, 2).unbind(-1)
+
+    # Cast freqs to input dtype (bf16) - rotation is numerically safe in bf16
+    freqs_cos = reshape_for_broadcast(freqs_cos, xq_r).to(xq_r.dtype)
+    freqs_sin = reshape_for_broadcast(freqs_sin, xq_r).to(xq_r.dtype)
 
     xq_out_r = xq_r * freqs_cos - xq_i * freqs_sin
     xq_out_i = xq_r * freqs_sin + xq_i * freqs_cos
@@ -113,4 +119,4 @@ def apply_rotary_emb(
     xq_out = torch.stack([xq_out_r, xq_out_i], dim=-1).flatten(3)
     xk_out = torch.stack([xk_out_r, xk_out_i], dim=-1).flatten(3)
 
-    return xq_out.type_as(xq), xk_out.type_as(xk)
+    return xq_out, xk_out

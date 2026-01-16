@@ -21,9 +21,9 @@ import modal
 # Image with all dependencies
 # =============================================================================
 
-PACKAGES = [
-    "torch==2.8.0",
-    "torchvision==0.23.0",
+BASE_PACKAGES = [
+    "torch==2.9.1",
+    "torchvision==0.24.1",
     "safetensors>=0.4.0",
     "huggingface_hub>=0.23.0",
     "pillow>=10.0.0",
@@ -34,21 +34,23 @@ PACKAGES = [
     "pytorch-fid>=0.3.0",
     "dino-perceptual>=0.1.0",
     "torchmetrics>=1.0.0",
-    "torchao>=0.5.0",
+    "torchao==0.15.0",
     "wandb",
     # For baseline VAEs and streaming datasets
     "diffusers>=0.25.0",
     "transformers>=4.36.0",
     "accelerate>=0.25.0",
     "datasets>=2.16.0",
-    # Note: flash-attn removed - using flex_attention for 2D SWA instead
-    # flash-attn requires packaging + complex build, not worth the hassle
 ]
+
+# Prebuilt flash-attn wheel for torch 2.9 + CUDA 12.8 (from mjun0812)
+FLASH_ATTN_WHEEL = "https://github.com/mjun0812/flash-attention-prebuild-wheels/releases/download/v0.7.0/flash_attn-2.6.3+cu128torch2.9-cp310-cp310-linux_x86_64.whl"
 
 image = (
     modal.Image.debian_slim(python_version="3.10")
     .apt_install("wget", "unzip", "curl")
-    .pip_install(*PACKAGES)
+    .pip_install(*BASE_PACKAGES)
+    .pip_install(FLASH_ATTN_WHEEL)
     .env({
         "PYTHONPATH": "/root/vitok-release",
         # Use weights from volume (run setup_weights.py first)
