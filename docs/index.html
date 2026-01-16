@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ViTok: Vision Transformer Tokenizer Evaluation</title>
+    <link rel="stylesheet" href="assets/css/style.css">
+</head>
+<body>
+    <header>
+        <h1>ViTok</h1>
+        <p class="subtitle">High-Quality Vision Transformer Tokenizer for Image Reconstruction</p>
+    </header>
+
+    <main>
+        <!-- Key Results -->
+        <section id="key-results">
+            <h2>Key Results</h2>
+            <div class="key-stats">
+                <div class="stat-card">
+                    <div class="stat-value">36.67 dB</div>
+                    <div class="stat-label">PSNR at 4096px</div>
+                    <div class="stat-detail">5B-f16x64 model</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-value">0.02</div>
+                    <div class="stat-label">FID at 4096px</div>
+                    <div class="stat-detail">Near-perfect distribution match</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-value">+2.5 dB</div>
+                    <div class="stat-label">vs Flux VAE</div>
+                    <div class="stat-detail">At 1024px resolution</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-value">8192px</div>
+                    <div class="stat-label">Max Resolution</div>
+                    <div class="stat-detail">Where baselines OOM</div>
+                </div>
+            </div>
+        </section>
+
+        <!-- DIV8K Results -->
+        <section id="results">
+            <h2>DIV8K Benchmark Results</h2>
+            <p>Evaluated on 1500 images from DIV8K dataset at native resolution.</p>
+            <div class="results-tabs">
+                <button class="tab-btn active" data-tab="div8k-1024">1024px</button>
+                <button class="tab-btn" data-tab="div8k-2048">2048px</button>
+                <button class="tab-btn" data-tab="div8k-4096">4096px</button>
+                <button class="tab-btn" data-tab="div8k-8192">8192px</button>
+            </div>
+            <div id="results-table-container">
+                <p class="loading">Loading results...</p>
+            </div>
+        </section>
+
+        <!-- Visual Comparison -->
+        <section id="comparison">
+            <h2>Visual Comparison</h2>
+            <p>Compare reconstructions across 5 challenging test images with fine details, textures, and gradients.</p>
+            <div class="comparison-controls">
+                <div class="control-group">
+                    <label for="resolution-select">Resolution:</label>
+                    <select id="resolution-select">
+                        <option value="challenge-384">384px</option>
+                        <option value="challenge-768" selected>768px</option>
+                        <option value="challenge-1536">1536px</option>
+                    </select>
+                </div>
+                <div class="control-group">
+                    <label for="image-select">Image:</label>
+                    <select id="image-select">
+                        <option value="0">Image 1</option>
+                        <option value="1">Image 2</option>
+                        <option value="2">Image 3</option>
+                        <option value="3">Image 4</option>
+                        <option value="4">Image 5</option>
+                    </select>
+                </div>
+                <div class="control-group">
+                    <label for="model-a-select">Model A:</label>
+                    <select id="model-a-select"></select>
+                </div>
+                <div class="control-group">
+                    <label for="model-b-select">Model B:</label>
+                    <select id="model-b-select"></select>
+                </div>
+                <div class="control-group">
+                    <label for="heatmap-toggle">
+                        <input type="checkbox" id="heatmap-toggle"> Show L1 Heatmap
+                    </label>
+                </div>
+                <div class="control-group">
+                    <label for="heatmap-opacity">Opacity:</label>
+                    <input type="range" id="heatmap-opacity" min="0" max="100" value="50">
+                </div>
+            </div>
+
+            <div class="comparison-viewer">
+                <div class="image-panel" id="panel-original">
+                    <h4>Original</h4>
+                    <div class="image-container">
+                        <img id="img-original" src="" alt="Original">
+                        <div class="magnifier" id="mag-original"></div>
+                    </div>
+                </div>
+                <div class="image-panel" id="panel-model-a">
+                    <h4 id="label-model-a">Model A</h4>
+                    <div class="image-container">
+                        <img id="img-model-a" src="" alt="Model A Reconstruction">
+                        <img id="heatmap-model-a" class="heatmap-overlay" src="" alt="Heatmap A">
+                        <div class="magnifier" id="mag-model-a"></div>
+                    </div>
+                    <div class="metrics" id="metrics-model-a"></div>
+                </div>
+                <div class="image-panel" id="panel-model-b">
+                    <h4 id="label-model-b">Model B</h4>
+                    <div class="image-container">
+                        <img id="img-model-b" src="" alt="Model B Reconstruction">
+                        <img id="heatmap-model-b" class="heatmap-overlay" src="" alt="Heatmap B">
+                        <div class="magnifier" id="mag-model-b"></div>
+                    </div>
+                    <div class="metrics" id="metrics-model-b"></div>
+                </div>
+            </div>
+
+            <p class="hint">Hover over images to magnify. Use controls above to compare different models.</p>
+        </section>
+
+        <!-- Model Variants -->
+        <section id="models">
+            <h2>Model Variants</h2>
+            <table class="model-table">
+                <thead>
+                    <tr>
+                        <th>Model</th>
+                        <th>Downsampling</th>
+                        <th>Latent Channels</th>
+                        <th>Notes</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr><td>5B-f16x64</td><td>16x</td><td>64</td><td>Best quality, recommended</td></tr>
+                    <tr><td>5B-f16x32</td><td>16x</td><td>32</td><td>Smaller latent, good quality</td></tr>
+                    <tr><td>5B-f32x128</td><td>32x</td><td>128</td><td>Higher compression</td></tr>
+                    <tr><td>5B-f32x64</td><td>32x</td><td>64</td><td>Highest compression</td></tr>
+                    <tr class="baseline"><td>Flux VAE</td><td>8x</td><td>16</td><td>Baseline - OOM at 4K+</td></tr>
+                    <tr class="baseline"><td>SD VAE</td><td>8x</td><td>4</td><td>Baseline - OOM at 4K+</td></tr>
+                </tbody>
+            </table>
+        </section>
+
+        <!-- Technical Notes -->
+        <section id="technical">
+            <h2>Technical Notes</h2>
+            <h3>SWA Window Study (8192px)</h3>
+            <p>Impact of Sliding Window Attention window size on quality and speed:</p>
+            <table class="model-table">
+                <thead>
+                    <tr>
+                        <th>SWA Window</th>
+                        <th>PSNR</th>
+                        <th>SSIM</th>
+                        <th>Latency</th>
+                        <th>Speedup</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr><td>1024</td><td>34.38</td><td>0.958</td><td>7.9s/img</td><td>1.00x</td></tr>
+                    <tr><td>512</td><td>34.30</td><td>0.957</td><td>7.4s/img</td><td>1.06x</td></tr>
+                    <tr><td>256</td><td>34.17</td><td>0.955</td><td>7.3s/img</td><td>1.08x</td></tr>
+                    <tr><td>64</td><td>34.06</td><td>0.953</td><td>7.1s/img</td><td>1.11x</td></tr>
+                </tbody>
+            </table>
+            <p class="hint">The bottleneck is decoder convolutions (2.38 PFLOPs), not attention. SWA window has minimal impact on speed.</p>
+        </section>
+    </main>
+
+    <footer>
+        <p>ViTok by <a href="https://github.com/philippe-eecs">philippe-eecs</a> |
+           <a href="https://github.com/philippe-eecs/vitok">GitHub</a></p>
+    </footer>
+
+    <script src="assets/js/app.js"></script>
+</body>
+</html>
