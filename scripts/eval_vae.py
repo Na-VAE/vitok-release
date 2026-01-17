@@ -60,7 +60,8 @@ def evaluate(
     swa_window: int | None = None,
     metrics: tuple[str, ...] = ("fid", "fdd", "ssim", "psnr"),
     compile: bool = True,
-    float8_mode: str | None = "inference",
+    float8_mode: str | None = None,
+    float8_scope: str = "all",
     attn_backend: str = "flash",
     device: torch.device | None = None,
     dtype: torch.dtype | None = None,
@@ -83,7 +84,8 @@ def evaluate(
         swa_window: Sliding window attention radius (None=full attention, try 1024 if OOM)
         metrics: Tuple of metrics to compute ("fid", "fdd", "ssim", "psnr")
         compile: Whether to use torch.compile
-        float8_mode: Quantization mode - "inference" for FP8/INT8, None for bf16
+        float8_mode: Quantization mode - None for bf16 (default), "inference" for FP8/INT8
+        float8_scope: Quantization scope - "all" for all linears, "mlp_only" for MLP layers only
         device: Device to use (default: auto-detect)
         dtype: Data type (default: bf16 on CUDA, fp32 on CPU)
         verbose: Print progress
@@ -139,11 +141,11 @@ def evaluate(
             config["sw"] = swa_window
 
         # Create models (float8 auto-applied on load_state_dict)
-        encoder = AE(**config, decoder=False, float8_mode=float8_mode, attn_backend=attn_backend).to(device=device, dtype=dtype)
+        encoder = AE(**config, decoder=False, float8_mode=float8_mode, float8_scope=float8_scope, attn_backend=attn_backend).to(device=device, dtype=dtype)
         encoder.load_state_dict(encoder_weights)
         encoder.eval()
 
-        decoder = AE(**config, encoder=False, float8_mode=float8_mode, attn_backend=attn_backend).to(device=device, dtype=dtype)
+        decoder = AE(**config, encoder=False, float8_mode=float8_mode, float8_scope=float8_scope, attn_backend=attn_backend).to(device=device, dtype=dtype)
         decoder.load_state_dict(decoder_weights)
         decoder.eval()
 
@@ -216,7 +218,7 @@ def evaluate(
             pp = f"center_crop({max_size})|to_tensor|normalize(minus_one_to_one)|patchify({patch_size}, {max_tokens})"
         else:
             pp = f"resize_longest_side({max_size})|to_tensor|normalize(minus_one_to_one)|patchify({patch_size}, {max_tokens})"
-        loader = create_dataloader(data, pp, batch_size=batch_size, drop_last=is_distributed)
+        loader = create_dataloader(data, pp, batch_size=batch_size, num_samples=num_samples, drop_last=is_distributed)
 
     # Initialize metrics
     metric_calc = MetricCalculator(metrics=metrics)
@@ -304,6 +306,7 @@ def evaluate(
         stats["swa_window"] = swa_window
         stats["compiled"] = do_compile
         stats["float8_mode"] = float8_mode
+        stats["float8_scope"] = float8_scope
 
     stats["data"] = data
 
@@ -371,7 +374,8 @@ def main():
     parser.add_argument("--swa-window", type=int, default=None, help="Sliding window attention radius (try 1024 if OOM)")
     parser.add_argument("--metrics", nargs="+", default=["fid", "fdd", "ssim", "psnr"], help="Metrics to compute")
     parser.add_argument("--no-compile", action="store_true", help="Disable torch.compile")
-    parser.add_argument("--float8", choices=["inference", "training", "none"], default="inference")
+    parser.add_argument("--float8", choices=["inference", "training", "none"], default="none")
+    parser.add_argument("--float8-scope", choices=["all", "mlp_only"], default="all", help="Quantization scope: all linears or MLP only")
     parser.add_argument("--attn-backend", choices=["flex", "flash", "sdpa"], default="flash", help="Attention backend")
     parser.add_argument("--save-visuals", type=int, default=0, help="Number of sample images to save")
     parser.add_argument("--output-dir", default=None, help="Directory to save visuals")
@@ -392,6 +396,7 @@ def main():
         metrics=tuple(args.metrics),
         compile=not args.no_compile,
         float8_mode=None if args.float8 == "none" else args.float8,
+        float8_scope=args.float8_scope,
         attn_backend=args.attn_backend,
         device=device,
         verbose=(rank == 0),
@@ -421,7 +426,8 @@ def run_eval_remote(
     swa_window: int | None = None,
     metrics: list[str] | None = None,
     no_compile: bool = False,
-    float8: str | None = "inference",
+    float8: str | None = None,
+    float8_scope: str = "all",
     attn_backend: str = "flash",
     save_visuals: int = 0,
     output_dir: str | None = None,
@@ -444,7 +450,8 @@ def run_eval_remote(
         swa_window=swa_window,
         metrics=tuple(metrics or ["fid", "fdd", "ssim", "psnr"]),
         compile=not no_compile,
-        float8_mode=float8,
+        float8_mode=None if float8 == "none" else float8,
+        float8_scope=float8_scope,
         attn_backend=attn_backend,
         save_visuals=save_visuals,
         output_dir=output_dir or ("/output/eval" if save_visuals > 0 else None),
@@ -463,7 +470,8 @@ def modal_main(
     swa_window: int = None,
     metrics: str = "fid,fdd,ssim,psnr",
     no_compile: bool = False,
-    float8: str = "inference",
+    float8: str = "none",
+    float8_scope: str = "all",
     attn_backend: str = "flash",
     save_visuals: int = 0,
     output_dir: str = None,
@@ -485,6 +493,7 @@ def modal_main(
         metrics=metrics.split(","),
         no_compile=no_compile,
         float8=float8,
+        float8_scope=float8_scope,
         attn_backend=attn_backend,
         save_visuals=save_visuals,
         output_dir=output_dir,

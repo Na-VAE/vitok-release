@@ -37,14 +37,16 @@ BASE_PACKAGES = [
     "torchao==0.15.0",
     "wandb",
     # For baseline VAEs and streaming datasets
-    "diffusers>=0.25.0",
+    # Upgraded to 0.32.0 for AutoencoderDC (DC-AE) support
+    "diffusers>=0.32.0",
     "transformers>=4.36.0",
     "accelerate>=0.25.0",
     "datasets>=2.16.0",
 ]
 
 # Prebuilt flash-attn wheel for torch 2.9 + CUDA 12.8 (from mjun0812)
-FLASH_ATTN_WHEEL = "https://github.com/mjun0812/flash-attention-prebuild-wheels/releases/download/v0.7.0/flash_attn-2.6.3+cu128torch2.9-cp310-cp310-linux_x86_64.whl"
+# Using 2.8.3 for compatibility with diffusers >=0.32.0 which requires _wrapped_flash_attn_backward
+FLASH_ATTN_WHEEL = "https://github.com/mjun0812/flash-attention-prebuild-wheels/releases/download/v0.7.0/flash_attn-2.8.3+cu128torch2.9-cp310-cp310-linux_x86_64.whl"
 
 image = (
     modal.Image.debian_slim(python_version="3.10")

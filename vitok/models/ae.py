@@ -14,9 +14,10 @@ from vitok.models.modules.rotary_embedding import compute_2d_freqs_cis
 from typing import Literal
 
 Float8Mode = Literal["training", "inference"]
+Float8Scope = Literal["all", "mlp_only"]
 
 
-def _apply_float8(module: nn.Module, mode: Float8Mode) -> None:
+def _apply_float8(module: nn.Module, mode: Float8Mode, scope: Float8Scope = "all") -> None:
     """Apply quantization to a module for float8 training or inference.
 
     For inference mode:
@@ -25,10 +26,26 @@ def _apply_float8(module: nn.Module, mode: Float8Mode) -> None:
 
     INT8 is required for A100 because TorchAO's Float8DynamicActivationFloat8WeightConfig
     requires compute capability 8.9+ (H100/Ada Lovelace or newer).
+
+    Args:
+        module: The module to quantize (Block or submodule)
+        mode: "training" for float8 training, "inference" for inference quantization
+        scope: "all" quantizes all linear layers, "mlp_only" only quantizes MLP/FFN layers
     """
+    # For mlp_only scope, only quantize the ffn submodule of Block
+    if scope == "mlp_only":
+        if hasattr(module, 'ffn'):
+            # This is a Block - only quantize its FFN
+            target = module.ffn
+        else:
+            # Already the FFN module itself
+            target = module
+    else:
+        target = module
+
     if mode == "training":
         from torchao.float8 import convert_to_float8_training
-        convert_to_float8_training(module)
+        convert_to_float8_training(target)
     else:
         # Check GPU compute capability for inference quantization
         if torch.cuda.is_available():
@@ -36,11 +53,11 @@ def _apply_float8(module: nn.Module, mode: Float8Mode) -> None:
             if cc[0] >= 9:
                 # H100 or newer - use FP8
                 from torchao.quantization import quantize_, Float8DynamicActivationFloat8WeightConfig
-                quantize_(module, Float8DynamicActivationFloat8WeightConfig())
+                quantize_(target, Float8DynamicActivationFloat8WeightConfig())
             else:
                 # A100 or older - use INT8 (FP8 not supported)
                 from torchao.quantization import quantize_, Int8DynamicActivationInt8WeightConfig
-                quantize_(module, Int8DynamicActivationInt8WeightConfig())
+                quantize_(target, Int8DynamicActivationInt8WeightConfig())
         else:
             # CPU fallback - skip quantization
             pass
@@ -149,6 +166,7 @@ class AE(nn.Module):
         layer_scale_init: float = 1e-4,
         drop_path_rate: float = 0.0,
         float8_mode: Optional[Float8Mode] = None,
+        float8_scope: Float8Scope = "all",
         encoder: bool = True,
         decoder: bool = True,
         sw: Optional[int] = None,
@@ -186,6 +204,7 @@ class AE(nn.Module):
         self.encoder = encoder
         self.decoder = decoder
         self.float8_mode = float8_mode
+        self.float8_scope = float8_scope
         self.sw = sw
         self.sw_every = max(1, sw_every)
         self.train_seq_len = train_seq_len
@@ -274,10 +293,10 @@ class AE(nn.Module):
         if self.float8_mode and not self._quantization_applied:
             if self.encoder:
                 for block in self.encoder_blocks:
-                    _apply_float8(block, self.float8_mode)
+                    _apply_float8(block, self.float8_mode, self.float8_scope)
             if self.decoder:
                 for block in self.decoder_blocks:
-                    _apply_float8(block, self.float8_mode)
+                    _apply_float8(block, self.float8_mode, self.float8_scope)
             self._quantization_applied = True
 
         return result
