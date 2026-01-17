@@ -1,7 +1,8 @@
 # ViTok-v2
 
-**ViTok-v2** (Vision Transformer Tokenizer v2) is a ViT-based image tokenizer designed for generative models. It features native aspect-ratio support via NaFlex patchification, enabling deployment at arbitrary resolutions while maintaining the scaling advantages of Vision Transformer architectures.
+**ViTok-v2** (Vision Transformer Tokenizer v2) is a ViT-based image tokenizer designed for generative models. It achieves **4x token reduction** for diffusion training through f16 compression (256 tokens vs 1024), matching SD/Flux generation quality via scaled decoders.
 
+[![Blog](https://img.shields.io/badge/Blog-GitHub%20Pages-blue)](https://na-vae.github.io/vitok-release/)
 [![Try Demo](https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-Demo-blue)](https://huggingface.co/spaces/philippehansen/navae)
 [![Paper](https://img.shields.io/badge/arXiv-2501.09755-b31b1b)](https://arxiv.org/abs/2501.09755)
 [![Models](https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-Models-yellow)](https://huggingface.co/Na-VAE)
