@@ -1,0 +1,1710 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ViTok-v2: Fully Native Resolution Auto-Encoder Scaled to 4.5 Billion Parameters</title>
+    <meta name="description" content="ViTok-v2 improves upon ViTok-v1 by integrating the Na-VAE scaling approach into the decoder, achieving competitive performance with current leading autoencoders.">
+    <link rel="canonical" href="https://na-vae.github.io/vitok-release/">
+
+    <!-- Open Graph / Social -->
+    <meta property="og:type" content="article">
+    <meta property="og:title" content="ViTok-v2: Fully Native Resolution Auto-Encoder">
+    <meta property="og:description" content="A Vision Transformer autoencoder scaled to 4.5B parameters, competitive with leading VAEs on reconstruction and generation metrics.">
+    <meta property="og:url" content="https://na-vae.github.io/vitok-release/">
+    <meta property="og:image" content="https://na-vae.github.io/vitok-release/assets/images/main_figure_v2.png">
+
+    <meta name="twitter:card" content="summary_large_image">
+    <meta name="twitter:title" content="ViTok-v2: Fully Native Resolution Auto-Encoder">
+    <meta name="twitter:description" content="A Vision Transformer autoencoder scaled to 4.5B parameters with NaFlex training, DINOv3 perceptual loss, and GAN-free optimization.">
+    <meta name="twitter:image" content="https://na-vae.github.io/vitok-release/assets/images/main_figure_v2.png">
+
+    <link rel="stylesheet" href="assets/css/style.css">
+</head>
+<body class="has-sidebar">
+    <!-- Sidebar Navigation -->
+    <aside class="sidebar">
+        <div class="sidebar-header">
+            <a href="#" class="sidebar-logo">ViTok-v2</a>
+            <p class="sidebar-tagline">Native Resolution Auto-Encoder at 4.5B Scale</p>
+        </div>
+        <nav class="sidebar-nav">
+            <div class="sidebar-section">
+                <div class="sidebar-section-title">Background</div>
+                <a href="#ldm-intro" class="sidebar-link">Latent Diffusion &amp; Flow Models</a>
+                <a href="#vae-landscape" class="sidebar-link">CNN vs ViT Autoencoders</a>
+                <a href="#vitok-v1" class="sidebar-link">ViTok-v1 Findings</a>
+            </div>
+            <div class="sidebar-section">
+                <div class="sidebar-section-title">Our Approach</div>
+                <a href="#contributions" class="sidebar-link">Key Contributions Overview</a>
+                <a href="#naflex" class="sidebar-link">NaFlex Resolution Flexibility</a>
+                <a href="#decoder-scaling" class="sidebar-link">Decoder Scaling</a>
+            </div>
+            <div class="sidebar-section">
+                <div class="sidebar-section-title">Results</div>
+                <a href="#coco-eval" class="sidebar-link">COCO Reconstruction</a>
+                <a href="#div8k-eval" class="sidebar-link">DIV8K High-Resolution</a>
+                <a href="#dit-training" class="sidebar-link">DiT Training Efficiency</a>
+            </div>
+            <div class="sidebar-section">
+                <div class="sidebar-section-title">Resources</div>
+                <a href="#citation" class="sidebar-link">Authors &amp; Citation</a>
+                <a href="#references" class="sidebar-link">References</a>
+                <a href="https://github.com/Na-VAE/vitok-release" class="sidebar-link" target="_blank">GitHub &nearr;</a>
+            </div>
+        </nav>
+    </aside>
+
+    <!-- Hero Section -->
+    <header class="hero-section">
+        <h1>ViTok-v2</h1>
+        <p class="hero-tagline">Fully Native Resolution Auto-Encoder Scaled to 4.5 Billion Parameters</p>
+        <p class="hero-abstract">
+            We improve upon ViTok-v1 by integrating NaFlex data pipeline and scaling the decoder,
+            achieving competitive performance with current leading autoencoders across reconstruction and generation metrics.
+        </p>
+
+        <div class="hero-links">
+            <a href="http://159.65.109.198:8080/" class="btn btn-primary" target="_blank" rel="noopener">Visual Comparison Tool</a>
+            <a href="https://github.com/Na-VAE/vitok-release" class="btn btn-secondary">GitHub</a>
+            <a href="https://github.com/Na-VAE/vitok-release/blob/main/vitok/pretrained.py" class="btn btn-secondary">Model Registry</a>
+        </div>
+    </header>
+
+    <main>
+        <!-- Latent Diffusion Models Introduction -->
+        <section id="ldm-intro" class="blog-wide">
+            <h2>Latent Diffusion and Flow Models</h2>
+
+            <div class="blog-prose">
+                <p>
+                    <strong>Diffusion models</strong><a href="#ref-1" class="citation">[1]</a> and <strong>flow-based models</strong><a href="#ref-15" class="citation">[15]</a>
+                    have emerged as the dominant paradigm for image generation, powering systems like
+                    Stable Diffusion<a href="#ref-2" class="citation">[2]</a>, DALL·E 3<a href="#ref-3" class="citation">[3]</a>,
+                    Flux<a href="#ref-4" class="citation">[4]</a>, Imagen<a href="#ref-19" class="citation">[19]</a>,
+                    and Sora<a href="#ref-20" class="citation">[20]</a>.
+                    Operating directly in pixel space is computationally prohibitive for high-resolution images, so
+                    central to these pipelines is the <strong>autoencoder</strong>, which converts the high-dimensional pixel space
+                    into a more compact, "diffusable" latent space. Each autoencoder can be characterized by its <strong>compression ratio</strong>&mdash;the
+                    ratio of input dimensions to latent dimensions. This is typically expressed as the number of latent tokens times the channels per token.
+                    For example, an 8&times; spatial downsampling with 16 channels yields 1024 tokens &times; 16 channels for a 256px image,
+                    giving a 12:1 compression ratio.
+                </p>
+                <p>
+                    <strong>Training autoencoders is challenging</strong>, due to two main challenges: 
+                    <br> (1) Simple L2 pixel loss produces blurry reconstructions because
+                    it cannot capture perceptual similarity&mdash;two images can have low pixel error yet look very different to humans.
+                    This has led to a proliferation of perceptual losses: VGG-based LPIPS<a href="#ref-13" class="citation">[13]</a>,
+                    adversarial GAN losses<a href="#ref-21" class="citation">[21]</a>, and more recently DINO-based losses<a href="#ref-11" class="citation">[11]</a>.
+                    For a deeper discussion on perceptual loss design, see our <a href="https://na-vae.github.io/dino_perceptual/" target="_blank">analysis</a>.
+                    <br> (2) A fundamental tension exists between <strong>reconstruction quality (rFID) and generation quality (gFID)</strong>.
+                    Lower compression ratios (more latent dimensions) enable better reconstruction but create more complex latent spaces
+                    that are harder for diffusion models to learn. Higher compression simplifies the generative task but limits reconstruction fidelity.
+                    Finding the right balance is key to practical latent diffusion systems.
+                </p>
+            </div>
+        </section>
+
+        <!-- VAE Landscape -->
+        <section id="vae-landscape" class="blog-wide">
+            <h2>CNN vs ViT Autoencoders</h2>
+
+            <div class="blog-prose">
+                <p>
+                    <strong>CNN-based VAEs</strong> have been the production standard since the original Stable Diffusion.
+                    SD-VAE<a href="#ref-2" class="citation">[2]</a> and its successor SDXL-VAE use convolutional encoders and decoders
+                    with 8&times; spatial downsampling. Flux VAE<a href="#ref-4" class="citation">[4]</a> extends this to 16 channels
+                    for richer latent representations. Their key advantage is <strong>translation invariance</strong>&mdash;CNNs
+                    generalize robustly across resolutions and aspect ratios, even when trained only at 256px.
+                    However, CNN architectures are limited in compression: most use 8&times; spatial reduction,
+                    yielding 1024 tokens for a 256px image.
+                </p>
+                <!-- <p>
+                    <strong>Discrete tokenizers</strong> emerged from the VQ-VAE<a href="#ref-22" class="citation">[22]</a> line of work.
+                    VQGAN<a href="#ref-21" class="citation">[21]</a> added adversarial training for perceptual quality,
+                    enabling autoregressive generation with transformers.
+                    ViT-VQGAN<a href="#ref-23" class="citation">[23]</a> modernized the architecture using Vision Transformers.
+                    MaskGIT<a href="#ref-24" class="citation">[24]</a> introduced efficient parallel decoding via masked prediction.
+                    More recently, MAGVIT-v2<a href="#ref-25" class="citation">[25]</a> and Open-MAGVIT2<a href="#ref-26" class="citation">[26]</a>
+                    achieved state-of-the-art discrete tokenization with large codebooks (2<sup>18</sup> codes).
+                    These discrete approaches enable straightforward autoregressive modeling but can suffer from codebook collapse
+                    and quantization artifacts.
+                    Early work on unified vision modeling includes UViM<a href="#ref-30" class="citation">[30]</a>, which uses learned guiding codes
+                    for a range of vision tasks within a single framework.
+                </p> -->
+                <p>
+                    <strong>Hybrid CNN-ViT VAEs</strong> push beyond 8&times; spatial reduction.
+                    DC-AE<a href="#ref-6" class="citation">[6]</a> achieves up to 128&times; compression using residual autoencoding
+                    with EfficientViT blocks in a primarily convolutional design.
+                    Cosmos Tokenizer<a href="#ref-28" class="citation">[28]</a> combines 3D convolutions with spatio-temporal attention
+                    for unified image/video tokenization.
+                    OmniTokenizer<a href="#ref-27" class="citation">[27]</a> uses transformer-based spatial-temporal decoupling.
+                </p>
+                <p>
+                    <strong>ViT-based VAEs</strong> have emerged more recently.
+                    TiTok<a href="#ref-5" class="citation">[5]</a> compresses images to just 32 tokens using a 1D latent representation.
+                    GigaTok<a href="#ref-7" class="citation">[7]</a> scales pure ViT tokenizers to 3 billion parameters.
+                    AToken<a href="#ref-29" class="citation">[29]</a> introduces a unified tokenizer achieving both high-fidelity reconstruction
+                    and semantic understanding across images, videos, and 3D assets using 4D RoPE and adversarial-free training.
+                    Concurrent work RAE<a href="#ref-12" class="citation">[12]</a> explores aligning pretrained representation encoders
+                    (SigLIP2, DINOv2, MAE) with learned decoders, showing frozen encoders can serve as strong diffusion latent spaces&mdash;though
+                    without exploring native resolution support in detail.
+                </p>
+                <p>
+                    <strong>The challenge with ViT-VAEs:</strong> they typically require GAN losses for perceptual quality, introducing training instability.
+                    More critically, vanilla ViTs struggle with resolution generalization&mdash;we discuss this limitation and our solution in the following sections.
+                </p>
+            </div>
+        </section>
+
+        <!-- ViTok-v1 -->
+        <section id="vitok-v1" class="blog-wide">
+            <h2>ViTok-v1 Findings</h2>
+
+            <div class="blog-prose">
+                <p>
+                    Our prior work, <strong>ViTok-v1</strong><a href="#ref-8" class="citation">[8]</a>, introduced a simple continuous ViT-VAE
+                    where each patch token maps directly to a latent vector. Key findings:
+                </p>
+                <ul>
+                    <li><strong>Asymmetric scaling:</strong> Decoder capacity drives reconstruction quality; encoders can remain relatively lightweight without performance loss</li>
+                    <li><strong>Reconstruction&ndash;generation trade-off:</strong> More latent channels improve reconstruction monotonically, but generation quality (gFID) is parabolic&mdash;too many channels create distributions that diffusion models struggle to learn</li>
+                    <li><strong>Token efficiency:</strong> ViT-VAEs can achieve comparable reconstruction quality to CNN-VAEs with far fewer tokens (e.g., 256 vs 1024), enabling faster diffusion training</li>
+                </ul>
+                <p>
+                    <strong>Limitations:</strong> ViTok-v1 exhibited the resolution generalization problem common to ViT architectures.
+                    Unlike CNNs which generalize naturally due to translation equivariance, <strong>vanilla ViTs fail catastrophically at higher resolutions</strong>&mdash;models
+                    trained at 256px produce severe grid artifacts when evaluated at 512px or with non-square aspect ratios.
+                    The learned positional embeddings simply do not extrapolate to unseen positions, causing the model to hallucinate
+                    patch boundaries and produce blocky artifacts.
+                    Additionally, ViTok-v1's largest model (302M parameters) left open questions about billion-scale behavior,
+                    and like other ViT-VAEs, it relied on GAN losses for competitive perceptual metrics, introducing training instability.
+                </p>
+            </div>
+        </section>
+
+        <!-- Key Contributions -->
+        <section id="contributions" class="blog-wide">
+            <h2>ViTok-v2: Our Approach</h2>
+
+            <div class="blog-prose">
+                <p>
+                    We build upon ViTok-v1 with two key improvements:
+                </p>
+                <ol>
+                    <li>
+                        <strong>NaFlex Resolution Flexibility: enabling resolution generalization via NaFlex.</strong>
+                        We integrate the NaFlex data pipeline<a href="#ref-9" class="citation">[9,10]</a>, which resizes images preserving aspect ratio,
+                        then pads to patch boundaries rather than distorting via crop or stretch. Combined with 2D RoPE positional embeddings<a href="#ref-14" class="citation">[14]</a>, models trained at 256px generalize to 512px, 1024px, and beyond
+                        without fine-tuning.
+                    </li>
+                    <li>
+                        <strong>Decoder Scaling: stable training with modern perceptual losses.</strong>
+                        We scale decoders to 4.5B parameters and replace unstable GAN objectives with
+                        DINOv3<a href="#ref-11" class="citation">[11]</a> perceptual loss. This achieves competitive reconstruction quality
+                        with stable, single-stage training.
+                    </li>
+                </ol>
+
+                <h3 style="margin-top: 1.5rem;">Model Architecture</h3>
+                <p>
+                    Our models use an asymmetric encoder-decoder design with relatively lightweight encoders and deep decoders. 
+                    Model names refer to the decoder size:
+                </p>
+                <table class="results-table" style="max-width: 500px; margin: 1rem 0;">
+                    <thead>
+                        <tr>
+                            <th>Model Name</th>
+                            <th>Encoder</th>
+                            <th>Decoder</th>
+                            <th>Total</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td>350M</td>
+                            <td>51M</td>
+                            <td>303M</td>
+                            <td>~354M</td>
+                        </tr>
+                        <tr>
+                            <td>5B</td>
+                            <td>463M</td>
+                            <td>4.5B</td>
+                            <td>~5B</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <figure class="figure">
+                <img src="assets/images/main_figure_v2.png"
+                     alt="ViTok-v2 method overview: NaFlex pipeline with gray padding, 2D RoPE embeddings, asymmetric encoder-decoder, LayerNorm latent normalization, and GAN-free DINOv3 perceptual loss"
+                     class="figure-img" style="max-width: 1000px;">
+                <figcaption class="figure-caption" style="max-width: 1000px; text-align: left;">
+                    <strong>ViTok-v2 method overview.</strong>
+                    <em>Left:</em> Input images are padded (gray) to the nearest patch multiple, preserving native resolution and aspect ratio.
+                    <em>Middle:</em> 2D RoPE embeddings encode patch positions. The encoder projects to <em>c</em> latent channels,
+                    normalized to N(0,1) via LayerNorm. The decoder (4.5B params) can use sliding window attention for memory efficiency.
+                    <em>Right:</em> Random crops are used to compute DINOv3 perceptual loss and SSIM, while Charbonnier loss is computed over the full image.
+                    Our approach is entirely GAN-free for stable training.
+                </figcaption>
+            </figure>
+
+            <!-- Compression Ratio Table -->
+            <h3 style="margin-top: 2rem; text-align: center;">Compression Configurations</h3>
+            <table class="results-table" style="max-width: 800px; margin: 1rem auto;">
+                <thead>
+                    <tr>
+                        <th>Config</th>
+                        <th>Spatial Factor</th>
+                        <th>Channels</th>
+                        <th>Compression Ratio</th>
+                        <th>Tokens (256px)</th>
+                        <th>Tokens (512px)</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr class="group-header">
+                        <td colspan="6"><em>Baselines</em></td>
+                    </tr>
+                    <tr class="baseline-row">
+                        <td>SD VAE (f8x4)</td>
+                        <td>8x</td>
+                        <td>4</td>
+                        <td>48:1</td>
+                        <td>1024</td>
+                        <td>4096</td>
+                    </tr>
+                    <tr class="baseline-row">
+                        <td>Flux VAE (f8x16)</td>
+                        <td>8x</td>
+                        <td>16</td>
+                        <td>12:1</td>
+                        <td>1024</td>
+                        <td>4096</td>
+                    </tr>
+                    <tr class="group-header">
+                        <td colspan="6"><em>ViTok-v2 (Ours)</em></td>
+                    </tr>
+                    <tr>
+                        <td>f16x64<br><small style="color: #666;">(our best model)</small></td>
+                        <td>16x</td>
+                        <td>64</td>
+                        <td>12:1</td>
+                        <td>256</td>
+                        <td>1024</td>
+                    </tr>
+                    <tr>
+                        <td>f16x32</td>
+                        <td>16x</td>
+                        <td>32</td>
+                        <td>24:1</td>
+                        <td>256</td>
+                        <td>1024</td>
+                    </tr>
+                    <tr>
+                        <td>f16x16</td>
+                        <td>16x</td>
+                        <td>16</td>
+                        <td>48:1</td>
+                        <td>256</td>
+                        <td>1024</td>
+                    </tr>
+                    <tr>
+                        <td>f32x64</td>
+                        <td>32x</td>
+                        <td>64</td>
+                        <td>48:1</td>
+                        <td>64</td>
+                        <td>256</td>
+                    </tr>
+                    <tr>
+                        <td>f32x128</td>
+                        <td>32x</td>
+                        <td>128</td>
+                        <td>24:1</td>
+                        <td>64</td>
+                        <td>256</td>
+                    </tr>
+                </tbody>
+            </table>
+            <p class="table-note">
+                Compression Ratio = (H &times; W &times; 3) / (H/f &times; W/f &times; C). Fewer tokens = cheaper DiT inference and faster training (usually at the cost of diffusability).
+            </p>
+        </section>
+
+        <!-- NaFlex Resolution Flexibility -->
+        <section id="naflex" class="blog-wide">
+            <h2>NaFlex: Resolution and Aspect-Ratio Flexibility</h2>
+            <div class="blog-prose">
+                <p>
+                    A key limitation of ViT-based autoencoders is their poor generalization to resolutions and aspect ratios
+                    outside their training distribution. We integrate the <strong>NaFlex data pipeline</strong><a href="#ref-9" class="citation">[9,10]</a>:
+                </p>
+                <ol>
+                    <li><strong>Preserve native aspect ratio:</strong> Images are resized so the longest side fits within a budget (e.g., 256px), keeping the original aspect ratio intact.</li>
+                    <li><strong>Gray-pad to patch boundary:</strong> Pad with gray (neutral value) to make dimensions divisible by patch size, rather than distorting via resize.</li>
+                    <li><strong>Patchify with spatial coordinates:</strong> Each patch gets explicit (row, col) coordinates stored in the batch metadata.</li>
+                    <li><strong>2D RoPE positional encoding<a href="#ref-14" class="citation">[14]</a>:</strong> Rotary embeddings encode patch positions as a continuous function of coordinates&mdash;enabling generalization to unseen positions.</li>
+                    <li><strong>Attention masking:</strong> Padded regions are masked out during attention so the model ignores padding patches.</li>
+                </ol>
+            </div>
+
+            <figure class="figure">
+                <img src="assets/images/patch_artifacts_comparison.png"
+                     alt="Patch boundary artifacts comparison: (a) ground truth, (b) fixed 256p square training, (c) 256 token NaFlex, (d) 1024 token NaFlex"
+                     class="figure-img" style="max-width: 1100px;">
+                <figcaption class="figure-caption">
+                    <strong>Patch boundary artifacts under different training regimes.</strong>
+                    We compare three training configurations: fixed 256p square crops, 256-token NaFlex (variable aspect ratio), and 1024-token NaFlex (higher resolution with variable aspect ratio).
+                    (a) <strong>Ground truth</strong> image at native aspect ratio.
+                    (b) <strong>Fixed 256p Square</strong> training produces visible grid artifacts at patch boundaries when evaluated on non-square aspect ratios.
+                    (c) <strong>256 Token NaFlex</strong> eliminates these artifacts by exposing the model to diverse aspect ratios during training.
+                    (d) <strong>1024 Token NaFlex</strong> further improves quality with higher-resolution training.
+                    Insets show zoomed regions highlighting the patch boundary effects.
+                </figcaption>
+            </figure>
+
+            <div class="blog-prose">
+                <p>
+                    ❗ <strong>Key benefits:</strong> Models trained at 256px generalize to 512px, 1024px, and beyond
+                    without fine-tuning. Small high-resolution finetunes further improve quality.
+                    The example image above is 1024p &times; 1536p, demonstrating that even the finetuned model generalizes well to unseen resolutions and aspect ratios.
+                </p>
+            </div>
+        </section>
+
+        <!-- Decoder Scaling Ablation -->
+        <section id="decoder-scaling" class="blog-wide">
+            <h2>Decoder Scaling</h2>
+            <div class="blog-prose">
+                <p>
+                    To investigate <strong>the scaling question: How does decoder capacity affect reconstruction at different compression levels?</strong>
+                    <br>
+                    we trained a suite of ViTok models using <strong>only L1 pixel loss</strong>&mdash;no
+                    perceptual losses, no adversarial training. This setup isolates the effect of scaling, allowing us to study pure scaling behavior.
+                </p>
+                <p>
+                    Recent work like GigaTok<a href="#ref-7" class="citation">[7]</a> scales ViT tokenizers to 3 billion parameters.
+                    We push further, training decoders from 88M (B-scale) to <strong>4.5B parameters</strong> (T-scale)
+                    across compression ratios from 12:1 to 48:1.
+                </p>
+            </div>
+
+            <figure class="figure" style="margin-top: 1.5rem;">
+                <img src="assets/images/decoder_scaling_ablation.png"
+                     alt="Decoder scaling ablation showing PSNR, SSIM, rFID, rFDD vs compression ratio for different model scales"
+                     class="figure-img" style="max-width: 1100px;">
+                <figcaption class="figure-caption">
+                    <strong>Decoder scaling ablation (L1 loss only).</strong>
+                    Each solid line represents a different decoder scale:
+                    <span style="color: #888;">gray</span> = Bd4-B (88M),
+                    <span style="color: #9467bd;">purple</span> = Ld4-L (302M),
+                    <span style="color: #1f77b4;">blue</span> = Gd4-G (1.1B),
+                    <span style="color: #d62728;">red</span> = Td4-T (4.5B).
+                    Dotted lines show the effect of doubling encoder depth.
+                    (a, b) PSNR and SSIM improve consistently with scale.
+                    (c, d) rFID and rFDD also improve, but remain high even at T-scale&mdash;L1 loss alone is insufficient for perceptual quality.
+                </figcaption>
+            </figure>
+
+            <div class="blog-prose">
+                <p>
+                    ❗ <strong>Key findings:</strong> Scaling the decoder consistently improves all metrics, but the benefits are
+                    <strong>most pronounced at aggressive compression</strong>. At 12:1 compression, the gap between L (302M decoder) and T (4.5B decoder)
+                    is modest. At 48:1, the gap widens dramatically: rFID improves from 12.2 to 2.3, and rFDD improves from 5.2 to 2.0.
+                    This makes intuitive sense: larger patches require more capacity to decode.
+                </p>
+                <p>
+                    However, even our largest T-scale model achieves rFID of only ~5 and rFDD of ~5 with L1 loss alone&mdash;far
+                    from competitive with GAN-trained baselines. This motivates our use of <strong>DINOv3 perceptual loss</strong>,
+                    which dramatically improves perceptual metrics without adversarial instability
+                    (see our <a href="https://na-vae.github.io/dino_perceptual/" target="_blank">detailed analysis</a>).
+                </p>
+            </div>
+        </section>
+
+        <!-- Perceptual Loss -->
+        <!-- COCO Evaluation Tables -->
+        <section id="coco-eval" class="blog-wide">
+            <h2>COCO Reconstruction Evaluation</h2>
+            <div class="blog-prose">
+                <p>
+                    We evaluate reconstruction on MS-COCO validation against reproduced baselines (FLUX.2 VAE, Qwen VAE<a href="#ref-18" class="citation">[18]</a>, SD VAE).
+                    Toggle between resolutions.
+                    <span class="best-legend">Best</span> and <span class="second-legend">second best</span> values highlighted.
+                </p>
+                <p class="metric-definitions" style="font-size: 0.9em; color: #666; margin-top: 0.5rem;">
+                    <strong>Metrics:</strong>
+                    <strong>Enc/Dec</strong> = encoder/decoder parameters;
+                    <strong>rFID/rFDD</strong> = reconstruction FID/FDD (lower is better);
+                    <strong>PSNR/SSIM</strong> = pixel-level metrics (higher is better);
+                    <strong>ms/img</strong> = latency per image (lower is better), A100-80GB, batch 500, compiled.
+                </p>
+            </div>
+
+            <div class="resolution-toggle">
+                <button class="toggle-btn active" data-resolution="256">256p</button>
+                <button class="toggle-btn" data-resolution="512">512p</button>
+            </div>
+
+            <div id="coco-table-container">
+                <!-- 256p table (default) -->
+                <table class="results-table" id="coco-256-table">
+                    <thead>
+                        <tr>
+                            <th>Model</th>
+                            <th>Enc</th>
+                            <th>Dec</th>
+                            <th>Compression</th>
+                            <th>Tokens</th>
+                            <th>rFID &darr;</th>
+                            <th>rFDD &darr;</th>
+                            <th>PSNR &uarr;</th>
+                            <th>SSIM &uarr;</th>
+                            <th>ms/img &darr;</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <!-- 12:1 Compression Group -->
+                        <tr class="group-header"><td colspan="10"><strong>12:1 Compression</strong></td></tr>
+                        <tr class="baseline-row">
+                            <td>FLUX.2 VAE</td>
+                            <td>34M</td>
+                            <td>49M</td>
+                            <td>f8x16</td>
+                            <td>1024</td>
+                            <td class="best">1.12</td>
+                            <td class="best">1.46</td>
+                            <td>31.48</td>
+                            <td>0.900</td>
+                            <td>2.14</td>
+                        </tr>
+                        <tr class="baseline-row">
+                            <td>Qwen VAE</td>
+                            <td>106M</td>
+                            <td>393M</td>
+                            <td>f8x16</td>
+                            <td>1024</td>
+                            <td class="second">1.71</td>
+                            <td class="second">3.79</td>
+                            <td>29.12</td>
+                            <td>0.849</td>
+                            <td>75.96</td>
+                        </tr>
+                        <tr>
+                            <td><strong>5B-f16x64</strong></td>
+                            <td>463M</td>
+                            <td>4.5B</td>
+                            <td>f16x64</td>
+                            <td>256</td>
+                            <td>2.98</td>
+                            <td>4.28</td>
+                            <td class="best">34.05</td>
+                            <td class="best">0.930</td>
+                            <td>3.59</td>
+                        </tr>
+                        <tr>
+                            <td>350M-f16x64</td>
+                            <td>51M</td>
+                            <td>303M</td>
+                            <td>f16x64</td>
+                            <td>256</td>
+                            <td>3.73</td>
+                            <td>5.62</td>
+                            <td class="second">32.83</td>
+                            <td class="second">0.918</td>
+                            <td>0.54</td>
+                        </tr>
+                        <tr>
+                            <td>5B-f32x256</td>
+                            <td>463M</td>
+                            <td>4.5B</td>
+                            <td>f32x256</td>
+                            <td>64</td>
+                            <td>6.10</td>
+                            <td>7.50</td>
+                            <td>31.47</td>
+                            <td>0.899</td>
+                            <td>0.91</td>
+                        </tr>
+                        <!-- 24:1 Compression Group -->
+                        <tr class="group-header"><td colspan="10"><strong>24:1 Compression</strong></td></tr>
+                        <tr class="baseline-row">
+                            <td>SDXL VAE</td>
+                            <td>34M</td>
+                            <td>49M</td>
+                            <td>f8x4</td>
+                            <td>1024</td>
+                            <td class="best">4.16</td>
+                            <td>9.59</td>
+                            <td>25.78</td>
+                            <td>0.740</td>
+                            <td>4.22</td>
+                        </tr>
+                        <tr>
+                            <td>5B-f16x32</td>
+                            <td>463M</td>
+                            <td>4.5B</td>
+                            <td>f16x32</td>
+                            <td>256</td>
+                            <td class="second">4.72</td>
+                            <td class="best">5.37</td>
+                            <td class="best">31.08</td>
+                            <td class="best">0.878</td>
+                            <td>3.59</td>
+                        </tr>
+                        <tr>
+                            <td>350M-f16x32</td>
+                            <td>51M</td>
+                            <td>303M</td>
+                            <td>f16x32</td>
+                            <td>256</td>
+                            <td>6.60</td>
+                            <td class="second">8.35</td>
+                            <td class="second">30.41</td>
+                            <td class="second">0.866</td>
+                            <td>0.54</td>
+                        </tr>
+                        <!-- 48:1 Compression Group -->
+                        <tr class="group-header"><td colspan="10"><strong>48:1 Compression</strong></td></tr>
+                        <tr class="baseline-row">
+                            <td>SD VAE</td>
+                            <td>34M</td>
+                            <td>49M</td>
+                            <td>f8x4</td>
+                            <td>1024</td>
+                            <td class="best">4.38</td>
+                            <td>12.10</td>
+                            <td>25.42</td>
+                            <td>0.715</td>
+                            <td>4.24</td>
+                        </tr>
+                        <tr>
+                            <td>5B-f16x16</td>
+                            <td>463M</td>
+                            <td>4.5B</td>
+                            <td>f16x16</td>
+                            <td>256</td>
+                            <td class="second">6.66</td>
+                            <td class="best">7.15</td>
+                            <td class="best">28.26</td>
+                            <td class="best">0.807</td>
+                            <td>3.62</td>
+                        </tr>
+                        <tr>
+                            <td>5B-f32x128</td>
+                            <td>463M</td>
+                            <td>4.5B</td>
+                            <td>f32x128</td>
+                            <td>64</td>
+                            <td>8.93</td>
+                            <td class="second">10.08</td>
+                            <td class="second">29.01</td>
+                            <td class="second">0.838</td>
+                            <td>0.89</td>
+                        </tr>
+                        <tr>
+                            <td>350M-f16x16</td>
+                            <td>51M</td>
+                            <td>303M</td>
+                            <td>f16x16</td>
+                            <td>256</td>
+                            <td>10.06</td>
+                            <td>11.79</td>
+                            <td>27.92</td>
+                            <td>0.795</td>
+                            <td>0.54</td>
+                        </tr>
+                        <tr>
+                            <td>5B-f32x64</td>
+                            <td>463M</td>
+                            <td>4.5B</td>
+                            <td>f32x64</td>
+                            <td>64</td>
+                            <td>11.07</td>
+                            <td>15.96</td>
+                            <td>26.51</td>
+                            <td>0.754</td>
+                            <td>0.90</td>
+                        </tr>
+                        <!-- 96:1 Compression Group -->
+                        <tr class="group-header"><td colspan="10"><strong>96:1 Compression</strong></td></tr>
+                        <tr class="baseline-row">
+                            <td>DC-AE-f32</td>
+                            <td>19M</td>
+                            <td>72M</td>
+                            <td>f32x32</td>
+                            <td>64</td>
+                            <td class="best">5.11</td>
+                            <td class="best">16.63</td>
+                            <td class="best">23.13</td>
+                            <td class="best">0.625</td>
+                            <td>5.72</td>
+                        </tr>
+                        <tr class="baseline-row">
+                            <td>DC-AE-f64</td>
+                            <td>43M</td>
+                            <td>310M</td>
+                            <td>f64x128</td>
+                            <td>16</td>
+                            <td class="second">5.95</td>
+                            <td class="second">16.04</td>
+                            <td class="second">23.31</td>
+                            <td class="second">0.632</td>
+                            <td>4.55</td>
+                        </tr>
+                    </tbody>
+                </table>
+
+                <!-- 512p table (hidden by default) -->
+                <table class="results-table hidden" id="coco-512-table">
+                    <thead>
+                        <tr>
+                            <th>Model</th>
+                            <th>Enc</th>
+                            <th>Dec</th>
+                            <th>Compression</th>
+                            <th>Tokens</th>
+                            <th>rFID &darr;</th>
+                            <th>rFDD &darr;</th>
+                            <th>PSNR &uarr;</th>
+                            <th>SSIM &uarr;</th>
+                            <th>ms/img &darr;</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <!-- 12:1 Compression Group -->
+                        <tr class="group-header"><td colspan="10"><strong>12:1 Compression</strong></td></tr>
+                        <tr class="baseline-row">
+                            <td>FLUX.2 VAE</td>
+                            <td>34M</td>
+                            <td>49M</td>
+                            <td>f8x16</td>
+                            <td>4096</td>
+                            <td class="second">0.45</td>
+                            <td class="best">0.45</td>
+                            <td>33.21</td>
+                            <td>0.914</td>
+                            <td>17.77</td>
+                        </tr>
+                        <tr class="baseline-row">
+                            <td>Qwen VAE</td>
+                            <td>106M</td>
+                            <td>393M</td>
+                            <td>f8x16</td>
+                            <td>4096</td>
+                            <td>0.79</td>
+                            <td>2.24</td>
+                            <td>30.77</td>
+                            <td>0.863</td>
+                            <td>52.68</td>
+                        </tr>
+                        <tr>
+                            <td><strong>5B-f16x64</strong></td>
+                            <td>463M</td>
+                            <td>4.5B</td>
+                            <td>f16x64</td>
+                            <td>1024</td>
+                            <td class="best">0.41</td>
+                            <td class="second">1.02</td>
+                            <td class="best">35.91</td>
+                            <td class="best">0.938</td>
+                            <td>70</td>
+                        </tr>
+                        <tr>
+                            <td>350M-f16x64</td>
+                            <td>51M</td>
+                            <td>303M</td>
+                            <td>f16x64</td>
+                            <td>1024</td>
+                            <td>0.48</td>
+                            <td>1.35</td>
+                            <td class="second">34.64</td>
+                            <td class="second">0.927</td>
+                            <td>39.04</td>
+                        </tr>
+                        <tr>
+                            <td>5B-f32x256</td>
+                            <td>463M</td>
+                            <td>4.5B</td>
+                            <td>f32x256</td>
+                            <td>256</td>
+                            <td>0.60</td>
+                            <td>1.68</td>
+                            <td>33.41</td>
+                            <td>0.912</td>
+                            <td>52.07</td>
+                        </tr>
+                        <!-- 24:1 Compression Group -->
+                        <tr class="group-header"><td colspan="10"><strong>24:1 Compression</strong></td></tr>
+                        <tr class="baseline-row">
+                            <td>SDXL VAE</td>
+                            <td>34M</td>
+                            <td>49M</td>
+                            <td>f8x4</td>
+                            <td>4096</td>
+                            <td>2.20</td>
+                            <td>4.77</td>
+                            <td>27.49</td>
+                            <td>0.762</td>
+                            <td>16.21</td>
+                        </tr>
+                        <tr>
+                            <td><strong>5B-f16x32</strong></td>
+                            <td>463M</td>
+                            <td>4.5B</td>
+                            <td>f16x32</td>
+                            <td>1024</td>
+                            <td class="best">1.02</td>
+                            <td class="best">1.44</td>
+                            <td class="best">32.86</td>
+                            <td class="best">0.888</td>
+                            <td>64.10</td>
+                        </tr>
+                        <tr>
+                            <td>350M-f16x32</td>
+                            <td>51M</td>
+                            <td>303M</td>
+                            <td>f16x32</td>
+                            <td>1024</td>
+                            <td class="second">1.49</td>
+                            <td class="second">3.14</td>
+                            <td class="second">32.15</td>
+                            <td class="second">0.877</td>
+                            <td>30.37</td>
+                        </tr>
+                        <tr>
+                            <td>5B-f32x128</td>
+                            <td>463M</td>
+                            <td>4.5B</td>
+                            <td>f32x128</td>
+                            <td>256</td>
+                            <td>1.96</td>
+                            <td>2.42</td>
+                            <td>30.75</td>
+                            <td>0.853</td>
+                            <td>61.76</td>
+                        </tr>
+                        <!-- 48:1 Compression Group -->
+                        <tr class="group-header"><td colspan="10"><strong>48:1 Compression</strong></td></tr>
+                        <tr class="baseline-row">
+                            <td>SD VAE</td>
+                            <td>34M</td>
+                            <td>49M</td>
+                            <td>f8x4</td>
+                            <td>4096</td>
+                            <td class="second">2.28</td>
+                            <td>4.79</td>
+                            <td>27.11</td>
+                            <td>0.742</td>
+                            <td>16.50</td>
+                        </tr>
+                        <tr>
+                            <td><strong>5B-f16x16</strong></td>
+                            <td>463M</td>
+                            <td>4.5B</td>
+                            <td>f16x16</td>
+                            <td>1024</td>
+                            <td class="best">2.27</td>
+                            <td class="best">2.24</td>
+                            <td class="best">30.07</td>
+                            <td class="best">0.824</td>
+                            <td>62.78</td>
+                        </tr>
+                        <tr>
+                            <td>350M-f16x16</td>
+                            <td>51M</td>
+                            <td>303M</td>
+                            <td>f16x16</td>
+                            <td>1024</td>
+                            <td>4.20</td>
+                            <td>7.00</td>
+                            <td class="second">29.77</td>
+                            <td class="second">0.815</td>
+                            <td>42.11</td>
+                        </tr>
+                        <tr>
+                            <td>5B-f32x64</td>
+                            <td>463M</td>
+                            <td>4.5B</td>
+                            <td>f32x64</td>
+                            <td>256</td>
+                            <td>4.38</td>
+                            <td class="second">4.13</td>
+                            <td>28.25</td>
+                            <td>0.778</td>
+                            <td>53.37</td>
+                        </tr>
+                        <!-- 96:1 Compression Group -->
+                        <tr class="group-header"><td colspan="10"><strong>96:1 Compression</strong></td></tr>
+                        <tr class="baseline-row">
+                            <td>DC-AE-f64</td>
+                            <td>43M</td>
+                            <td>310M</td>
+                            <td>f64x128</td>
+                            <td>64</td>
+                            <td class="best">2.67</td>
+                            <td class="best">3.30</td>
+                            <td class="best">25.37</td>
+                            <td class="best">0.679</td>
+                            <td>17.91</td>
+                        </tr>
+                        <tr class="baseline-row">
+                            <td>DC-AE-f32</td>
+                            <td>19M</td>
+                            <td>72M</td>
+                            <td>f32x32</td>
+                            <td>256</td>
+                            <td class="second">2.88</td>
+                            <td class="second">5.67</td>
+                            <td class="second">25.04</td>
+                            <td class="second">0.668</td>
+                            <td>18.29</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <p class="table-note">
+                ViTok f16 models use 4&times; fewer tokens than f8 baselines (256 vs 1024 at 256p), enabling faster DiT training.
+                Latency measured with torch.compile on H100, adm_center crop, 5000 samples (batch 500 @ 256p, batch 125 @ 512p).
+            </p>
+        </section>
+
+        <!-- DIV8K High-Resolution Tables -->
+        <section id="div8k-eval" class="blog-wide">
+            <h2>DIV8K High-Resolution Evaluation</h2>
+            <div class="blog-prose">
+                <p>
+                    We evaluate on DIV8K at high resolutions with native aspect ratios.
+                    At 1024p and 2048p, our models run at comparable speed to baselines while achieving <strong>state-of-the-art reconstruction quality</strong>.
+                    At 4096p and above, <strong>baseline VAEs either run out of memory or are extremely slow</strong> (~20-170 seconds/image),
+                    while ViTok models run <strong>15-30&times; faster</strong> without OOM issues.
+                </p>
+            </div>
+
+            <div class="resolution-tabs">
+                <button class="tab-btn active" data-tab="div8k-1024">1024p</button>
+                <button class="tab-btn" data-tab="div8k-2048">2048p</button>
+                <button class="tab-btn" data-tab="div8k-4096">4096p</button>
+                <button class="tab-btn" data-tab="div8k-8192">8192p</button>
+            </div>
+
+            <div id="div8k-table-container">
+                <!-- 1024p table -->
+                <table class="results-table" id="div8k-1024-table">
+                    <thead>
+                        <tr>
+                            <th>Model</th>
+                            <th>Enc</th>
+                            <th>Dec</th>
+                            <th>Compression</th>
+                            <th>rFID &darr;</th>
+                            <th>rFDD &darr;</th>
+                            <th>PSNR &uarr;</th>
+                            <th>SSIM &uarr;</th>
+                            <th>ms/img &darr;</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <!-- 12:1 Compression Group -->
+                        <tr class="group-header"><td colspan="9"><strong>12:1 Compression</strong></td></tr>
+                        <tr class="baseline-row">
+                            <td>FLUX.2 VAE</td>
+                            <td>34M</td>
+                            <td>49M</td>
+                            <td>f8x16</td>
+                            <td>0.90</td>
+                            <td class="best">0.44</td>
+                            <td>31.44</td>
+                            <td>0.908</td>
+                            <td>107.6</td>
+                        </tr>
+                        <tr class="baseline-row">
+                            <td>Qwen VAE</td>
+                            <td>106M</td>
+                            <td>393M</td>
+                            <td>f8x16</td>
+                            <td>1.50</td>
+                            <td>1.28</td>
+                            <td>28.84</td>
+                            <td>0.845</td>
+                            <td>237.3</td>
+                        </tr>
+                        <tr>
+                            <td><strong>5B-f16x64</strong></td>
+                            <td>463M</td>
+                            <td>4.5B</td>
+                            <td>f16x64</td>
+                            <td class="best">0.35</td>
+                            <td class="second">0.89</td>
+                            <td class="best">33.99</td>
+                            <td class="best">0.932</td>
+                            <td>207.4</td>
+                        </tr>
+                        <tr>
+                            <td>350M-f16x64</td>
+                            <td>51M</td>
+                            <td>303M</td>
+                            <td>f16x64</td>
+                            <td class="second">0.44</td>
+                            <td>1.30</td>
+                            <td class="second">32.78</td>
+                            <td class="second">0.918</td>
+                            <td>11.98</td>
+                        </tr>
+                        <tr>
+                            <td>5B-f32x256</td>
+                            <td>463M</td>
+                            <td>4.5B</td>
+                            <td>f32x256</td>
+                            <td>0.52</td>
+                            <td>1.67</td>
+                            <td>31.42</td>
+                            <td>0.899</td>
+                            <td>15.54</td>
+                        </tr>
+                        <!-- 24:1 Compression Group -->
+                        <tr class="group-header"><td colspan="9"><strong>24:1 Compression</strong></td></tr>
+                        <tr class="baseline-row">
+                            <td>SDXL VAE</td>
+                            <td>34M</td>
+                            <td>49M</td>
+                            <td>f8x8</td>
+                            <td>4.79</td>
+                            <td>3.53</td>
+                            <td>25.96</td>
+                            <td>0.731</td>
+                            <td>128.2</td>
+                        </tr>
+                        <tr>
+                            <td><strong>5B-f16x32</strong></td>
+                            <td>463M</td>
+                            <td>4.5B</td>
+                            <td>f16x32</td>
+                            <td class="best">1.21</td>
+                            <td class="best">2.16</td>
+                            <td class="best">30.98</td>
+                            <td class="best">0.874</td>
+                            <td>70.81</td>
+                        </tr>
+                        <tr>
+                            <td>350M-f16x32</td>
+                            <td>51M</td>
+                            <td>303M</td>
+                            <td>f16x32</td>
+                            <td class="second">1.63</td>
+                            <td class="second">3.62</td>
+                            <td class="second">30.32</td>
+                            <td class="second">0.861</td>
+                            <td>12.01</td>
+                        </tr>
+                        <tr>
+                            <td>5B-f32x128</td>
+                            <td>463M</td>
+                            <td>4.5B</td>
+                            <td>f32x128</td>
+                            <td>1.68</td>
+                            <td>3.13</td>
+                            <td>29.05</td>
+                            <td>0.834</td>
+                            <td>15.23</td>
+                        </tr>
+                        <!-- 48:1 Compression Group -->
+                        <tr class="group-header"><td colspan="9"><strong>48:1 Compression</strong></td></tr>
+                        <tr class="baseline-row">
+                            <td>SD VAE</td>
+                            <td>34M</td>
+                            <td>49M</td>
+                            <td>f8x4</td>
+                            <td>5.59</td>
+                            <td>4.39</td>
+                            <td>25.58</td>
+                            <td>0.707</td>
+                            <td>110.1</td>
+                        </tr>
+                        <tr>
+                            <td><strong>5B-f16x16</strong></td>
+                            <td>463M</td>
+                            <td>4.5B</td>
+                            <td>f16x16</td>
+                            <td class="best">3.05</td>
+                            <td class="best">3.17</td>
+                            <td class="best">28.45</td>
+                            <td class="best">0.802</td>
+                            <td>71.41</td>
+                        </tr>
+                        <tr>
+                            <td>5B-f32x64</td>
+                            <td>463M</td>
+                            <td>4.5B</td>
+                            <td>f32x64</td>
+                            <td class="second">4.69</td>
+                            <td>6.14</td>
+                            <td>26.96</td>
+                            <td>0.754</td>
+                            <td>15.21</td>
+                        </tr>
+                        <tr>
+                            <td>350M-f16x16</td>
+                            <td>51M</td>
+                            <td>303M</td>
+                            <td>f16x16</td>
+                            <td>4.83</td>
+                            <td class="second">6.96</td>
+                            <td class="second">28.11</td>
+                            <td class="second">0.788</td>
+                            <td>11.88</td>
+                        </tr>
+                        <!-- 96:1 Compression Group -->
+                        <tr class="group-header"><td colspan="9"><strong>96:1 Compression</strong></td></tr>
+                        <tr class="baseline-row">
+                            <td>DC-AE-f64</td>
+                            <td>43M</td>
+                            <td>310M</td>
+                            <td>f64x128</td>
+                            <td class="best">6.52</td>
+                            <td class="best">4.33</td>
+                            <td class="best">24.09</td>
+                            <td class="best">0.648</td>
+                            <td>422.1</td>
+                        </tr>
+                        <tr class="baseline-row">
+                            <td>DC-AE-f32</td>
+                            <td>19M</td>
+                            <td>72M</td>
+                            <td>f32x32</td>
+                            <td class="second">7.08</td>
+                            <td class="second">4.88</td>
+                            <td class="second">23.71</td>
+                            <td class="second">0.636</td>
+                            <td>334.5</td>
+                        </tr>
+                    </tbody>
+                </table>
+
+                <!-- 2048p table -->
+                <table class="results-table hidden" id="div8k-2048-table">
+                    <thead>
+                        <tr>
+                            <th>Model</th>
+                            <th>Enc</th>
+                            <th>Dec</th>
+                            <th>Compression</th>
+                            <th>rFID &darr;</th>
+                            <th>rFDD &darr;</th>
+                            <th>PSNR &uarr;</th>
+                            <th>SSIM &uarr;</th>
+                            <th>ms/img &darr;</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <!-- 12:1 Compression Group -->
+                        <tr class="group-header"><td colspan="9"><strong>12:1 Compression</strong></td></tr>
+                        <tr class="baseline-row">
+                            <td>FLUX.2 VAE</td>
+                            <td>34M</td>
+                            <td>49M</td>
+                            <td>f8x16</td>
+                            <td>0.48</td>
+                            <td>0.16</td>
+                            <td>32.57</td>
+                            <td>0.918</td>
+                            <td>~284</td>
+                        </tr>
+                        <tr class="baseline-row">
+                            <td>Qwen VAE</td>
+                            <td>106M</td>
+                            <td>393M</td>
+                            <td>f8x16</td>
+                            <td>0.69</td>
+                            <td>0.31</td>
+                            <td>29.98</td>
+                            <td>0.864</td>
+                            <td>790.3</td>
+                        </tr>
+                        <tr>
+                            <td><strong>5B-f16x64</strong></td>
+                            <td>463M</td>
+                            <td>4.5B</td>
+                            <td>f16x64</td>
+                            <td class="best">0.06</td>
+                            <td class="best">0.11</td>
+                            <td class="best">34.93</td>
+                            <td class="best">0.938</td>
+                            <td>293.7</td>
+                        </tr>
+                        <tr>
+                            <td>350M-f16x64</td>
+                            <td>51M</td>
+                            <td>303M</td>
+                            <td>f16x64</td>
+                            <td class="second">0.08</td>
+                            <td class="second">0.13</td>
+                            <td class="second">33.76</td>
+                            <td class="second">0.926</td>
+                            <td>49.4</td>
+                        </tr>
+                        <tr>
+                            <td>5B-f32x256</td>
+                            <td>463M</td>
+                            <td>4.5B</td>
+                            <td>f32x256</td>
+                            <td>0.07</td>
+                            <td>0.15</td>
+                            <td>32.66</td>
+                            <td>0.912</td>
+                            <td>70.3</td>
+                        </tr>
+                        <!-- 24:1 Compression Group -->
+                        <tr class="group-header"><td colspan="9"><strong>24:1 Compression</strong></td></tr>
+                        <tr class="baseline-row">
+                            <td>SDXL VAE</td>
+                            <td>34M</td>
+                            <td>49M</td>
+                            <td>f8x8</td>
+                            <td colspan="5" style="text-align: center; color: #666;">N/A &ndash; too slow at 2048p</td>
+                        </tr>
+                        <tr>
+                            <td><strong>5B-f16x32</strong></td>
+                            <td>463M</td>
+                            <td>4.5B</td>
+                            <td>f16x32</td>
+                            <td class="best">0.19</td>
+                            <td class="best">0.47</td>
+                            <td class="best">31.99</td>
+                            <td class="best">0.886</td>
+                            <td>291.5</td>
+                        </tr>
+                        <tr>
+                            <td>350M-f16x32</td>
+                            <td>51M</td>
+                            <td>303M</td>
+                            <td>f16x32</td>
+                            <td class="second">0.27</td>
+                            <td class="second">0.70</td>
+                            <td class="second">31.29</td>
+                            <td class="second">0.874</td>
+                            <td>49.7</td>
+                        </tr>
+                        <tr>
+                            <td>5B-f32x128</td>
+                            <td>463M</td>
+                            <td>4.5B</td>
+                            <td>f32x128</td>
+                            <td>0.73</td>
+                            <td>0.70</td>
+                            <td>29.99</td>
+                            <td>0.853</td>
+                            <td>70.2</td>
+                        </tr>
+                        <!-- 48:1 Compression Group -->
+                        <tr class="group-header"><td colspan="9"><strong>48:1 Compression</strong></td></tr>
+                        <tr class="baseline-row">
+                            <td>SD VAE</td>
+                            <td>34M</td>
+                            <td>49M</td>
+                            <td>f8x4</td>
+                            <td>1.92</td>
+                            <td>1.91</td>
+                            <td>26.57</td>
+                            <td>0.738</td>
+                            <td>289.8</td>
+                        </tr>
+                        <tr>
+                            <td><strong>5B-f16x16</strong></td>
+                            <td>463M</td>
+                            <td>4.5B</td>
+                            <td>f16x16</td>
+                            <td class="best">0.69</td>
+                            <td class="best">1.11</td>
+                            <td class="best">29.39</td>
+                            <td class="best">0.818</td>
+                            <td>290.3</td>
+                        </tr>
+                        <tr>
+                            <td>5B-f32x64</td>
+                            <td>463M</td>
+                            <td>4.5B</td>
+                            <td>f32x64</td>
+                            <td class="second">0.67</td>
+                            <td>1.87</td>
+                            <td class="second">28.11</td>
+                            <td class="second">0.782</td>
+                            <td>70.5</td>
+                        </tr>
+                        <tr>
+                            <td>350M-f16x16</td>
+                            <td>51M</td>
+                            <td>303M</td>
+                            <td>f16x16</td>
+                            <td>0.96</td>
+                            <td class="second">2.17</td>
+                            <td>28.99</td>
+                            <td>0.805</td>
+                            <td>49.3</td>
+                        </tr>
+                        <!-- 96:1 Compression Group -->
+                        <tr class="group-header"><td colspan="9"><strong>96:1 Compression</strong></td></tr>
+                        <tr class="baseline-row">
+                            <td>DC-AE-f64</td>
+                            <td>-</td>
+                            <td>-</td>
+                            <td>f64x128</td>
+                            <td colspan="5" style="text-align: center; color: #666;">N/A &ndash; too slow at 2048p</td>
+                        </tr>
+                        <tr class="baseline-row">
+                            <td>DC-AE-f32</td>
+                            <td>-</td>
+                            <td>-</td>
+                            <td>f32x32</td>
+                            <td colspan="5" style="text-align: center; color: #666;">N/A &ndash; too slow at 2048p</td>
+                        </tr>
+                    </tbody>
+                </table>
+
+                <!-- 4096p table -->
+                <table class="results-table hidden" id="div8k-4096-table">
+                    <thead>
+                        <tr>
+                            <th>Model</th>
+                            <th>ms/img</th>
+                            <th>Note</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr class="baseline-row">
+                            <td>FLUX.2 VAE</td>
+                            <td>~20,500</td>
+                            <td>Too slow for full eval</td>
+                        </tr>
+                        <tr class="baseline-row">
+                            <td>SD VAE</td>
+                            <td>~20,500</td>
+                            <td>Too slow for full eval</td>
+                        </tr>
+                        <tr class="baseline-row">
+                            <td>Qwen VAE</td>
+                            <td class="oom">OOM</td>
+                            <td>Requires &gt;80GB VRAM</td>
+                        </tr>
+                        <tr class="baseline-row">
+                            <td>DC-AE-f32</td>
+                            <td class="oom">OOM</td>
+                            <td>Requires &gt;80GB VRAM</td>
+                        </tr>
+                        <tr class="baseline-row">
+                            <td>DC-AE-f64</td>
+                            <td class="oom">OOM</td>
+                            <td>Requires &gt;80GB VRAM</td>
+                        </tr>
+                        <tr>
+                            <td><strong>350M-f16x64</strong></td>
+                            <td class="best">490</td>
+                            <td></td>
+                        </tr>
+                        <tr>
+                            <td><strong>350M-f16x32</strong></td>
+                            <td>700</td>
+                            <td></td>
+                        </tr>
+                        <tr>
+                            <td><strong>350M-f16x16</strong></td>
+                            <td class="second">333</td>
+                            <td></td>
+                        </tr>
+                        <tr>
+                            <td>5B-f16x64</td>
+                            <td>1,205</td>
+                            <td></td>
+                        </tr>
+                        <tr>
+                            <td>5B-f16x32</td>
+                            <td>1,195</td>
+                            <td></td>
+                        </tr>
+                        <tr>
+                            <td>5B-f16x16</td>
+                            <td>1,215</td>
+                            <td></td>
+                        </tr>
+                        <tr>
+                            <td>5B-f32x256</td>
+                            <td>431</td>
+                            <td></td>
+                        </tr>
+                        <tr>
+                            <td>5B-f32x128</td>
+                            <td>442</td>
+                            <td></td>
+                        </tr>
+                        <tr>
+                            <td>5B-f32x64</td>
+                            <td>450</td>
+                            <td></td>
+                        </tr>
+                    </tbody>
+                </table>
+
+                <!-- 8192p table -->
+                <table class="results-table hidden" id="div8k-8192-table">
+                    <thead>
+                        <tr>
+                            <th>Model</th>
+                            <th>ms/img</th>
+                            <th>Note</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr class="baseline-row">
+                            <td>FLUX.2 VAE</td>
+                            <td>~167,000</td>
+                            <td>Too slow for full eval</td>
+                        </tr>
+                        <tr class="baseline-row">
+                            <td>SD VAE</td>
+                            <td>~168,000</td>
+                            <td>Too slow for full eval</td>
+                        </tr>
+                        <tr class="baseline-row">
+                            <td>Qwen VAE</td>
+                            <td class="oom">OOM</td>
+                            <td>Requires &gt;80GB VRAM</td>
+                        </tr>
+                        <tr class="baseline-row">
+                            <td>DC-AE-f32</td>
+                            <td class="oom">OOM</td>
+                            <td>Requires &gt;80GB VRAM</td>
+                        </tr>
+                        <tr class="baseline-row">
+                            <td>DC-AE-f64</td>
+                            <td class="oom">OOM</td>
+                            <td>Requires &gt;80GB VRAM</td>
+                        </tr>
+                        <tr>
+                            <td><strong>350M-f16x64</strong></td>
+                            <td class="best">952</td>
+                            <td></td>
+                        </tr>
+                        <tr>
+                            <td><strong>350M-f16x32</strong></td>
+                            <td class="best">885</td>
+                            <td></td>
+                        </tr>
+                        <tr>
+                            <td><strong>350M-f16x16</strong></td>
+                            <td class="best">935</td>
+                            <td></td>
+                        </tr>
+                        <tr>
+                            <td>5B-f16x64</td>
+                            <td>5,420</td>
+                            <td></td>
+                        </tr>
+                        <tr>
+                            <td>5B-f16x32</td>
+                            <td>5,180</td>
+                            <td></td>
+                        </tr>
+                        <tr>
+                            <td>5B-f16x16</td>
+                            <td>5,730</td>
+                            <td></td>
+                        </tr>
+                        <tr>
+                            <td>5B-f32x256</td>
+                            <td class="second">1,260</td>
+                            <td></td>
+                        </tr>
+                        <tr>
+                            <td>5B-f32x128</td>
+                            <td class="second">1,250</td>
+                            <td></td>
+                        </tr>
+                        <tr>
+                            <td>5B-f32x64</td>
+                            <td class="second">1,290</td>
+                            <td></td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <p class="table-note">
+                DIV8K evaluation with native aspect ratio crops.
+                Latency measured on H100 (batch size 2 for 4096p, 1 for 8192p). At 4096p+, baseline VAEs are too slow or OOM,
+                while ViTok models process images 15-30&times; faster without memory issues.
+            </p>
+        </section>
+
+        <!-- Visual Comparison -->
+        <section id="comparison" class="blog-prose">
+            <h2>Visual Comparison Tool</h2>
+            <p>
+                Compare reconstructions across models with our interactive viewer. Supports magnification,
+                error heatmaps, and side-by-side comparison.
+            </p>
+
+            <div class="visualizer-cta">
+                <a href="http://159.65.109.198:8080/" class="btn btn-primary" target="_blank" rel="noopener">
+                    Open Visual Comparison Tool
+                </a>
+            </div>
+
+            <!-- Static fallback -->
+            <div class="comparison-grid">
+                <div class="comparison-item">
+                    <img src="http://159.65.109.198:8080/images/challenge-768/5B-f16x64/recons/0000.jpg" alt="ViTok 5B reconstruction" loading="lazy">
+                    <span class="comparison-label">ViTok 5B-f16x64</span>
+                </div>
+                <div class="comparison-item">
+                    <img src="http://159.65.109.198:8080/images/challenge-768/flux/recons/0000.jpg" alt="Flux VAE reconstruction" loading="lazy">
+                    <span class="comparison-label">Flux VAE</span>
+                </div>
+            </div>
+        </section>
+
+        <!-- DiT Training Curves -->
+        <section id="dit-training" class="blog-wide">
+            <h2>DiT Training Efficiency</h2>
+            <div class="blog-prose">
+                <p>
+                    To study the reconstruction–generation trade-off, we trained <strong>Diffusion Transformers (DiT)</strong><a href="#ref-17" class="citation">[17]</a>
+                    at two scales (450M DiT-L and 1.2B DiT-G) using <strong>flow matching</strong><a href="#ref-15" class="citation">[15]</a> on ImageNet-22K
+                    for <strong>300 epochs</strong> (batch size 4096, learning rate 1e-3, cosine schedule).
+                    All models use ViTok f16 compression (256 tokens per 256px image) with different channel configurations (16ch, 32ch, 64ch).
+                    We compare the performance of each DiT size with both VAE decoder sizes (5B Td4-T vs 302M Ld4-L) to isolate the effect of reconstruction quality on generation.
+                </p>
+            </div>
+
+            <h3 style="margin-top: 2rem;">Reconstruction vs Generation Metrics</h3>
+            <figure class="figure">
+                <img src="assets/images/rfid_gfid_correlation.png"
+                     alt="Scatter plot showing rFID vs gFID and rFDD vs gFDD correlation across VAE sizes, DiT sizes, and compression settings"
+                     class="figure-img">
+                <figcaption class="figure-caption">
+                    <strong>Reconstruction vs generation quality.</strong>
+                    (a) rFID vs gFID. (b) rFDD vs gFDD.
+                    <strong>Blue:</strong> 5B VAE (256p f16). <strong>Red:</strong> 302M VAE (256p f16). <strong>Green:</strong> 5B VAE (512p f32).
+                    Circles: 1.2B DiT. Squares: 450M DiT. Diamonds: 512p f32 experiments.
+                    Labels indicate channel count.
+                </figcaption>
+            </figure>
+
+            <div class="blog-prose" style="margin-top: 1.5rem;">
+                <p>
+                    <strong>Key Takeaways:</strong>
+                    Channel count and DiT size interact&mdash;smaller DiT models (450M) work better with lower channel counts (16ch, 32ch), while larger DiT models (1.2B) can leverage higher channel counts (64ch) given sufficient training.
+                    There is a clear FID vs FDD trade-off: 64ch achieves the best gFID at convergence, but 16ch maintains better gFDD throughout training, suggesting lower-dimensional latents produce more diverse generations.
+                    Decoder capacity matters significantly for generation&mdash;the 5B VAE decoder outperforms the 302M decoder by 1&ndash;2 gFID points at convergence, with the gap widening as training progresses.
+                    Our 256-token f16 configuration matches the quality of 1024-token f8 baselines at 4&times; lower training compute.
+                </p>
+                <p>
+                    <strong>512p f32 compression:</strong> We also explored 32&times; spatial downsampling for higher-resolution generation.
+                    This reduces token count to just <strong>256 tokens</strong> for 512p images (vs 1024 tokens for f16 at 512p),
+                    enabling efficient high-resolution generation while maintaining quality.
+                    The 512p f32 results (green diamonds) show 128ch achieves better rFID (0.32 vs 1.1) but 64ch achieves better gFDD (9.4 vs 15.6)&mdash;the classic reconstruction-generation trade-off.
+                </p>
+            </div>
+
+        </section>
+
+        <!-- Limitations -->
+        <section id="limitations" class="blog-wide">
+            <h2>Limitations</h2>
+            <div class="blog-prose">
+                <ul>
+                    <li><strong>Texture quality:</strong> Flux models still produce better quality textures, likely due to their use of generative/adversarial losses during training</li>
+                    <li><strong>High compression challenges:</strong> Extreme compression configurations (e.g., f32x256) failed to train stable DiT models in our experiments</li>
+                    <li><strong>Decoder inference cost:</strong> 4.5B decoder is slower than smaller VAEs (acceptable since it only runs once per generated image)</li>
+                    <li><strong>Video compression:</strong> Not yet supported&mdash;extending to video auto-encoding is future work</li>
+                    <li><strong>CFG saturation artifacts:</strong> ViTok latents can produce oversaturated samples when using standard classifier-free guidance (CFG). This manifests as overly contrasty, saturated colors (see example below). The issue can be mitigated using <strong>CFG interval</strong><a href="#ref-31" class="citation">[31]</a>&mdash;applying guidance only between 10-90% of the sampling process&mdash;combined with <strong>rescaled CFG</strong> (scaling CFG output by the ratio of conditional to unconditional standard deviations). Radial CFG may also provide better results and is worth exploring.</li>
+                </ul>
+            </div>
+
+            <figure class="figure" style="margin-top: 1.5rem;">
+                <img src="assets/images/cfg_saturation_example.png"
+                     alt="Example of CFG saturation artifacts in ViTok-decoded images showing oversaturated colors"
+                     class="figure-img" style="max-width: 800px;">
+                <figcaption class="figure-caption">
+                    <strong>CFG saturation artifacts.</strong> Standard CFG with ViTok latents can produce oversaturated, overly contrasty images.
+                    CFG interval<a href="#ref-31" class="citation">[31]</a> (applying guidance only at 10-90% of sampling) and rescaled CFG help restore natural color distributions.
+                </figcaption>
+            </figure>
+        </section>
+
+        <!-- References -->
+        <section id="references" class="blog-wide">
+            <h2>References</h2>
+            <div class="references">
+                <ol>
+                    <li id="ref-1">
+                        Ho, Jain, Abbeel. <strong>Denoising Diffusion Probabilistic Models.</strong> NeurIPS 2020.
+                        <a href="https://arxiv.org/abs/2006.11239" target="_blank">arXiv:2006.11239</a>
+                    </li>
+                    <li id="ref-2">
+                        Rombach, Blattmann, Lorenz, Esser, Ommer. <strong>High-Resolution Image Synthesis with Latent Diffusion Models.</strong> CVPR 2022.
+                        <a href="https://arxiv.org/abs/2112.10752" target="_blank">arXiv:2112.10752</a>
+                    </li>
+                    <li id="ref-3">
+                        Betker et al. <strong>Improving Image Generation with Better Captions.</strong> OpenAI 2023.
+                        <a href="https://cdn.openai.com/papers/dall-e-3.pdf" target="_blank">Paper</a>
+                    </li>
+                    <li id="ref-4">
+                        Black Forest Labs. <strong>FLUX.1.</strong> 2024.
+                        <a href="https://blackforestlabs.ai/" target="_blank">Website</a>
+                    </li>
+                    <li id="ref-5">
+                        Yu et al. <strong>An Image is Worth 32 Tokens for Reconstruction and Generation.</strong> NeurIPS 2024.
+                        <a href="https://arxiv.org/abs/2406.07550" target="_blank">arXiv:2406.07550</a>
+                    </li>
+                    <li id="ref-6">
+                        Chen et al. <strong>Deep Compression Autoencoder for Efficient High-Resolution Diffusion Models.</strong> 2024.
+                        <a href="https://arxiv.org/abs/2410.10733" target="_blank">arXiv:2410.10733</a>
+                    </li>
+                    <li id="ref-7">
+                        Xiong et al. <strong>GigaTok: Scaling Visual Tokenizers to 3 Billion Parameters.</strong> 2025.
+                        <a href="https://arxiv.org/abs/2504.02803" target="_blank">arXiv:2504.02803</a>
+                    </li>
+                    <li id="ref-8">
+                        Hansen-Estruch et al. <strong>Learnings from Scaling Visual Tokenizers for Reconstruction and Generation.</strong> 2025.
+                        <a href="https://arxiv.org/abs/2501.09755" target="_blank">arXiv:2501.09755</a>
+                    </li>
+                    <li id="ref-9">
+                        Dehghani et al. <strong>Patch n' Pack: NaViT, a Vision Transformer for any Aspect Ratio and Resolution.</strong> NeurIPS 2023.
+                        <a href="https://arxiv.org/abs/2307.06304" target="_blank">arXiv:2307.06304</a>
+                    </li>
+                    <li id="ref-10">
+                        Tschannen et al. <strong>SigLIP 2: Multilingual Vision-Language Encoders with Improved Semantic Understanding.</strong> 2025.
+                        <a href="https://arxiv.org/abs/2502.14786" target="_blank">arXiv:2502.14786</a>
+                    </li>
+                    <li id="ref-11">
+                        Simeoni et al. <strong>DINOv3.</strong> 2025.
+                        <a href="https://arxiv.org/abs/2508.10104" target="_blank">arXiv:2508.10104</a>
+                    </li>
+                    <li id="ref-12">
+                        Yao, Wang. <strong>Reconstruction vs. Generation: Taming Optimization Dilemma in Latent Diffusion Models.</strong> 2025.
+                        <a href="https://arxiv.org/abs/2501.01423" target="_blank">arXiv:2501.01423</a>
+                    </li>
+                    <li id="ref-13">
+                        Zhang et al. <strong>The Unreasonable Effectiveness of Deep Features as a Perceptual Metric.</strong> CVPR 2018.
+                        <a href="https://arxiv.org/abs/1801.03924" target="_blank">arXiv:1801.03924</a>
+                    </li>
+                    <li id="ref-14">
+                        Su et al. <strong>RoFormer: Enhanced Transformer with Rotary Position Embedding.</strong> 2021.
+                        <a href="https://arxiv.org/abs/2104.09864" target="_blank">arXiv:2104.09864</a>
+                    </li>
+                    <li id="ref-15">
+                        Lipman et al. <strong>Flow Matching for Generative Modeling.</strong> ICLR 2023.
+                        <a href="https://arxiv.org/abs/2210.02747" target="_blank">arXiv:2210.02747</a>
+                    </li>
+                    <li id="ref-16">
+                        Beltagy, Peters, Cohan. <strong>Longformer: The Long-Document Transformer.</strong> 2020.
+                        <a href="https://arxiv.org/abs/2004.05150" target="_blank">arXiv:2004.05150</a>
+                    </li>
+                    <li id="ref-17">
+                        Peebles, Xie. <strong>Scalable Diffusion Models with Transformers.</strong> ICCV 2023.
+                        <a href="https://arxiv.org/abs/2212.09748" target="_blank">arXiv:2212.09748</a>
+                    </li>
+                    <li id="ref-18">
+                        Wu et al. <strong>Qwen-Image Technical Report.</strong> 2025.
+                        <a href="https://arxiv.org/abs/2508.02324" target="_blank">arXiv:2508.02324</a>
+                    </li>
+                    <li id="ref-19">
+                        Saharia et al. <strong>Photorealistic Text-to-Image Diffusion Models with Deep Language Understanding.</strong> NeurIPS 2022.
+                        <a href="https://arxiv.org/abs/2205.11487" target="_blank">arXiv:2205.11487</a>
+                    </li>
+                    <li id="ref-20">
+                        OpenAI. <strong>Sora: Creating video from text.</strong> 2024.
+                        <a href="https://openai.com/sora" target="_blank">Website</a>
+                    </li>
+                    <li id="ref-21">
+                        Esser et al. <strong>Taming Transformers for High-Resolution Image Synthesis.</strong> CVPR 2021.
+                        <a href="https://arxiv.org/abs/2012.09841" target="_blank">arXiv:2012.09841</a>
+                    </li>
+                    <li id="ref-22">
+                        van den Oord et al. <strong>Neural Discrete Representation Learning.</strong> NeurIPS 2017.
+                        <a href="https://arxiv.org/abs/1711.00937" target="_blank">arXiv:1711.00937</a>
+                    </li>
+                    <li id="ref-23">
+                        Yu et al. <strong>Vector-quantized Image Modeling with Improved VQGAN.</strong> ICLR 2022.
+                        <a href="https://arxiv.org/abs/2110.04627" target="_blank">arXiv:2110.04627</a>
+                    </li>
+                    <li id="ref-24">
+                        Chang et al. <strong>MaskGIT: Masked Generative Image Transformer.</strong> CVPR 2022.
+                        <a href="https://arxiv.org/abs/2202.04200" target="_blank">arXiv:2202.04200</a>
+                    </li>
+                    <li id="ref-25">
+                        Yu et al. <strong>Language Model Beats Diffusion &ndash; Tokenizer is Key to Visual Generation.</strong> ICLR 2024.
+                        <a href="https://arxiv.org/abs/2310.05737" target="_blank">arXiv:2310.05737</a>
+                    </li>
+                    <li id="ref-26">
+                        Luo et al. <strong>Open-MAGVIT2: An Open-Source Project Toward Democratizing Auto-regressive Visual Generation.</strong> 2024.
+                        <a href="https://arxiv.org/abs/2409.04410" target="_blank">arXiv:2409.04410</a>
+                    </li>
+                    <li id="ref-27">
+                        Wang et al. <strong>OmniTokenizer: A Joint Image-Video Tokenizer for Visual Generation.</strong> 2024.
+                        <a href="https://arxiv.org/abs/2406.09399" target="_blank">arXiv:2406.09399</a>
+                    </li>
+                    <li id="ref-28">
+                        Agarwal et al. <strong>Cosmos Tokenizer: A suite of image and video neural tokenizers.</strong> NVIDIA 2024.
+                        <a href="https://github.com/NVIDIA/Cosmos-Tokenizer" target="_blank">GitHub</a>
+                    </li>
+                    <li id="ref-29">
+                        Lu, Song et al. <strong>AToken: A Unified Tokenizer for Vision.</strong> 2025.
+                        <a href="https://arxiv.org/abs/2509.14476" target="_blank">arXiv:2509.14476</a>
+                    </li>
+                    <li id="ref-30">
+                        Kolesnikov et al. <strong>UViM: A Unified Modeling Approach for Vision with Learned Guiding Codes.</strong> NeurIPS 2022.
+                        <a href="https://arxiv.org/abs/2205.10337" target="_blank">arXiv:2205.10337</a>
+                    </li>
+                    <li id="ref-31">
+                        Kynkäänniemi et al. <strong>Applying Guidance in a Limited Interval Improves Sample and Distribution Quality in Diffusion Models.</strong> NeurIPS 2024.
+                        <a href="https://arxiv.org/abs/2404.07724" target="_blank">arXiv:2404.07724</a>
+                    </li>
+                </ol>
+            </div>
+        </section>
+
+        <!-- Authors & Citation -->
+        <section id="citation" class="blog-prose">
+            <h2>Authors &amp; Citation</h2>
+            <p>
+                <strong>Authors:</strong>
+                <a href="https://github.com/philippe-eecs">Philippe Hansen-Estruch</a>,
+                Jiahui Chen,
+                <a href="https://vkramanuj.github.io/">Vivek Ramanujan</a>,
+                Orr Zohar,
+                Yan Ping,
+                Animesh Sinha,
+                Markos Georgopoulos,
+                Edgar Schoenfeld,
+                Ji Hou,
+                Felix Juefei-Xu,
+                Sriram Vishwanath,
+                Ali Thabet
+            </p>
+            <p><strong>If you find this work useful, please cite:</strong></p>
+            <pre class="code-block"><code>@article{hansenestruch2025vitokv2,
+  title={ViTok-v2: Scaling Vision Transformer Tokenizers to 4.5 Billion Parameters},
+  author={Hansen-Estruch, Philippe and Chen, Jiahui and Ramanujan, Vivek and Zohar, Orr and Ping, Yan and Sinha, Animesh and Georgopoulos, Markos and Schoenfeld, Edgar and Hou, Ji and Juefei-Xu, Felix and Vishwanath, Sriram and Thabet, Ali},
+  journal={arXiv preprint},
+  year={2025}
+}</code></pre>
+        </section>
+    </main>
+
+    <footer>
+        <p>
+            ViTok-v2 by <a href="https://github.com/philippe-eecs">Philippe Hansen-Estruch</a> &amp; <a href="https://vkramanuj.github.io/">Vivek Ramanujan</a> |
+            <a href="https://github.com/Na-VAE/vitok-release">GitHub</a> |
+            <a href="https://github.com/Na-VAE/vitok-release/blob/main/vitok/pretrained.py">Model Registry</a>
+        </p>
+    </footer>
+
+    <script src="assets/js/app.js"></script>
+</body>
+</html>

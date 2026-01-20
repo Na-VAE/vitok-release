@@ -1,0 +1,80 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vitok"
+version = "0.1.0"
+description = "ViTok: Vision Transformer Tokenizer with NaFlex"
+readme = "README.md"
+license = {text = "Apache-2.0"}
+requires-python = ">=3.10"
+authors = [
+    {name = "ViTok Team"}
+]
+keywords = ["vision", "transformer", "tokenizer", "autoencoder", "diffusion"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+dependencies = [
+    "torch>=2.4.0",
+    "torchvision>=0.19.0",
+    "webdataset>=0.2.86",
+    "huggingface_hub>=0.23.0",
+    "safetensors>=0.4.0",
+    "pillow>=10.0.0",
+    "numpy>=1.24.0",
+]
+
+[project.optional-dependencies]
+train = [
+    "wandb>=0.16.0",
+    "tqdm>=4.66.0",
+]
+eval = [
+    "scipy>=1.11.0",
+    "pytorch-fid>=0.3.0",
+]
+float8 = [
+    "torchao>=0.5.0",
+]
+swa = [
+    "natten>=0.21.0",
+]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-cov>=4.0.0",
+    "ruff>=0.3.0",
+]
+all = [
+    "vitok[train,eval,float8,dev]",
+]
+
+[project.urls]
+Homepage = "https://na-vae.github.io/vitok-release/"
+Documentation = "https://github.com/Na-VAE/vitok-release#readme"
+Repository = "https://github.com/Na-VAE/vitok-release"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["vitok*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
