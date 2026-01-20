@@ -1,0 +1,39 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Distribution / packaging
+*.egg-info/
+dist/
+build/
+eggs/
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+
+# pytest
+.pytest_cache/
+
+# uv
+uv.lock
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test outputs
+tests/test_outputs/
+results/
+
+# Git worktrees
+worktrees/

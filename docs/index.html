@@ -1,0 +1,296 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ViTok v2: 4x Fewer Tokens for Diffusion Training</title>
+    <meta name="description" content="ViTok v2 achieves 4x token reduction for diffusion model training with f16 compression (256 tokens vs 1024), matching SD/Flux quality through scaled decoders.">
+    <link rel="canonical" href="https://na-vae.github.io/vitok-release/">
+
+    <!-- Open Graph / Social -->
+    <meta property="og:type" content="article">
+    <meta property="og:title" content="ViTok v2: 4x Fewer Tokens for Diffusion Training">
+    <meta property="og:description" content="Train diffusion models 4x more efficiently with f16 compression. 256 tokens achieve the same generation quality as 1024 tokens.">
+    <meta property="og:url" content="https://na-vae.github.io/vitok-release/">
+    <meta property="og:image" content="http://159.65.109.198:8080/assets/images/dit_training_curve.png">
+
+    <meta name="twitter:card" content="summary_large_image">
+    <meta name="twitter:title" content="ViTok v2: 4x Fewer Tokens for Diffusion Training">
+    <meta name="twitter:description" content="Train diffusion models 4x more efficiently with f16 compression.">
+    <meta name="twitter:image" content="http://159.65.109.198:8080/assets/images/dit_training_curve.png">
+
+    <link rel="stylesheet" href="assets/css/style.css">
+</head>
+<body>
+    <!-- Hero Section -->
+    <header class="hero-section">
+        <h1>ViTok v2</h1>
+        <p class="hero-tagline">4x Fewer Tokens for Diffusion Training</p>
+        <p class="hero-subtitle">A Vision Transformer tokenizer with f16 compression that matches SD/Flux generation quality using 256 tokens instead of 1024.</p>
+
+        <div class="key-stats">
+            <div class="stat-card">
+                <div class="stat-value">256</div>
+                <div class="stat-label">Tokens per Image</div>
+                <div class="stat-detail">f16 compression (16x spatial)</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value">4x</div>
+                <div class="stat-label">Token Reduction</div>
+                <div class="stat-detail">vs SD/Flux (1024 tokens)</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value">2.85</div>
+                <div class="stat-label">Generation FID</div>
+                <div class="stat-detail">Matches 1024-token baselines</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value">36.7 dB</div>
+                <div class="stat-label">Reconstruction PSNR</div>
+                <div class="stat-detail">+2.5 dB vs Flux VAE</div>
+            </div>
+        </div>
+
+        <div class="hero-links">
+            <a href="https://github.com/Na-VAE/vitok-release" class="btn btn-primary">GitHub</a>
+            <a href="https://huggingface.co/collections/philippehansen/vitok-v2-6789" class="btn btn-secondary">Models on HuggingFace</a>
+        </div>
+    </header>
+
+    <main>
+        <!-- The Problem -->
+        <section id="problem" class="blog-prose">
+            <h2>The Problem: Token Count Drives Training Cost</h2>
+            <p>
+                Diffusion transformers (DiT) process images as sequences of latent tokens. The number of tokens
+                directly determines training cost: attention scales quadratically with sequence length, and
+                every transformer layer processes each token.
+            </p>
+            <p>
+                Current image generation models like Stable Diffusion and Flux use f8 VAEs that encode a
+                256x256 image into 32x32 = <strong>1024 tokens</strong>. For higher resolutions, this explodes:
+                a 1024x1024 image becomes 16,384 tokens. Training on such long sequences is expensive.
+            </p>
+            <p>
+                The obvious solution is more aggressive spatial compression. But previous attempts at f16 or
+                f32 compression suffered significant quality loss&mdash;the autoencoder bottleneck was too tight
+                to preserve fine details.
+            </p>
+        </section>
+
+        <!-- The Solution -->
+        <section id="solution" class="blog-prose">
+            <h2>The Solution: Scaled Decoders Unlock Aggressive Compression</h2>
+            <p>
+                ViTok v2 demonstrates that the quality bottleneck in high-compression autoencoders is the
+                <em>decoder</em>, not the latent space itself. By scaling the decoder to 5B parameters while
+                keeping the encoder small, we achieve f16 compression (256 tokens) with reconstruction quality
+                exceeding f8 baselines.
+            </p>
+            <p>
+                The key insight: for diffusion training, the encoder only runs once to create the training
+                dataset. The decoder never runs during training&mdash;it's only needed for final image generation.
+                This asymmetry means we can use a heavyweight decoder without affecting training cost.
+            </p>
+            <div class="callout">
+                <strong>Result:</strong> 256 tokens achieve the same generation FID as 1024 tokens, enabling
+                ~4x faster DiT training at equivalent quality.
+            </div>
+        </section>
+
+        <!-- Results -->
+        <section id="results" class="blog-wide">
+            <h2>DiT Training Efficiency</h2>
+            <p class="blog-prose">
+                We trained DiT-XL/2 models using ViTok latents with different channel configurations.
+                All use f16 compression (256 tokens). The plot shows generation FID on ImageNet 256x256
+                class-conditional generation.
+            </p>
+
+            <figure class="figure">
+                <img src="http://159.65.109.198:8080/assets/images/dit_training_curve_dark.png" alt="DiT training curves showing generation FID vs training steps for different latent channel configurations" class="figure-img">
+                <figcaption class="figure-caption">
+                    Generation FID vs training steps. All ViTok configurations use 256 tokens (f16 compression).
+                    The 64-channel latent achieves FID comparable to SD/Flux baselines that use 1024 tokens.
+                </figcaption>
+            </figure>
+        </section>
+
+        <!-- Visual Comparison -->
+        <section id="comparison" class="blog-prose">
+            <h2>Reconstruction Quality</h2>
+            <p>
+                Despite 4x more compression, ViTok reconstructions preserve fine details better than f8
+                baselines. The scaled decoder recovers texture, text, and high-frequency details that
+                smaller decoders lose.
+            </p>
+
+            <div class="visualizer-cta">
+                <p>Compare reconstructions across models with our interactive viewer:</p>
+                <a href="http://159.65.109.198:8080/" class="btn btn-primary" target="_blank" rel="noopener">
+                    Open Visual Comparison Tool
+                </a>
+                <p class="hint">Supports magnification, error heatmaps, and side-by-side comparison.</p>
+            </div>
+
+            <!-- Static fallback -->
+            <div class="comparison-grid">
+                <div class="comparison-item">
+                    <img src="http://159.65.109.198:8080/images/challenge-768/5B-f16x64/recons/0000.jpg" alt="ViTok 5B reconstruction" loading="lazy">
+                    <span class="comparison-label">ViTok 5B-f16x64</span>
+                </div>
+                <div class="comparison-item">
+                    <img src="http://159.65.109.198:8080/images/challenge-768/flux/recons/0000.jpg" alt="Flux VAE reconstruction" loading="lazy">
+                    <span class="comparison-label">Flux VAE</span>
+                </div>
+            </div>
+        </section>
+
+        <!-- Try It Yourself -->
+        <section id="quickstart" class="blog-prose">
+            <h2>Try It Yourself</h2>
+
+            <h3>Installation</h3>
+            <pre class="code-block"><code>pip install vitok</code></pre>
+
+            <h3>Basic Usage</h3>
+            <pre class="code-block"><code>from vitok import load_pretrained, AE, decode_variant
+from PIL import Image
+import torch
+
+# Load the 5B model (best quality)
+weights = load_pretrained("5B-f16x64")
+model = AE(**decode_variant(weights['variant']))
+model.load_state_dict({**weights['encoder'], **weights['decoder']})
+model = model.cuda().eval()
+
+# Preprocess image
+from vitok.preprocessing import preprocess
+image = Image.open("your_image.jpg")
+x = preprocess(image, max_size=1024).cuda()
+
+# Encode and decode
+with torch.no_grad():
+    z = model.encode(x)      # Shape: [1, 64, H/16, W/16]
+    recon = model.decode(z)  # Reconstructed image</code></pre>
+
+            <h3>Modal Quick Start (GPU)</h3>
+            <p>For GPU inference without local setup, use Modal:</p>
+            <pre class="code-block"><code># Install Modal CLI
+pip install modal
+modal token new
+
+# Run inference on Modal's GPUs
+modal run vitok.modal_inference --image path/to/image.jpg --model 5B-f16x64</code></pre>
+        </section>
+
+        <!-- Model Guide -->
+        <section id="models" class="blog-wide">
+            <h2>Model Guide</h2>
+            <p class="blog-prose">
+                Choose the right model for your use case. All models use f16 compression (256 tokens for 256px images).
+            </p>
+
+            <table class="model-table">
+                <thead>
+                    <tr>
+                        <th>Model</th>
+                        <th>Decoder</th>
+                        <th>Tokens</th>
+                        <th>Channels</th>
+                        <th>PSNR</th>
+                        <th>Use Case</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td>
+                            <a href="https://huggingface.co/philippehansen/ViTok-v2-5B-f16x64">5B-f16x64</a>
+                            <span class="model-badge best">Best Quality</span>
+                        </td>
+                        <td>5B</td>
+                        <td>256</td>
+                        <td>64</td>
+                        <td>36.7 dB</td>
+                        <td>Production image generation, highest fidelity</td>
+                    </tr>
+                    <tr>
+                        <td>
+                            <a href="https://huggingface.co/philippehansen/ViTok-v2-5B-f16x32">5B-f16x32</a>
+                            <span class="model-badge balanced">Balanced</span>
+                        </td>
+                        <td>5B</td>
+                        <td>256</td>
+                        <td>32</td>
+                        <td>35.8 dB</td>
+                        <td>Good quality with smaller latent memory</td>
+                    </tr>
+                    <tr>
+                        <td>
+                            <a href="https://huggingface.co/philippehansen/ViTok-v2-350M-f16x64">350M-f16x64</a>
+                            <span class="model-badge fast">Fast</span>
+                        </td>
+                        <td>350M</td>
+                        <td>256</td>
+                        <td>64</td>
+                        <td>34.2 dB</td>
+                        <td>Fast inference, real-time applications</td>
+                    </tr>
+                    <tr>
+                        <td>
+                            <a href="https://huggingface.co/philippehansen/ViTok-v2-5B-f32x128">5B-f32x128</a>
+                        </td>
+                        <td>5B</td>
+                        <td>64</td>
+                        <td>128</td>
+                        <td>33.5 dB</td>
+                        <td>Maximum compression (16x token reduction)</td>
+                    </tr>
+                </tbody>
+            </table>
+
+            <h3>Recommendations</h3>
+            <ul class="recommendations">
+                <li><strong>Training a new diffusion model?</strong> Use 5B-f16x64 for the training dataset, then decode with the same model.</li>
+                <li><strong>Need fast inference?</strong> 350M-f16x64 runs 3x faster with acceptable quality loss.</li>
+                <li><strong>Memory constrained?</strong> 5B-f16x32 halves latent memory with minimal quality impact.</li>
+                <li><strong>Extreme compression experiments?</strong> Try 5B-f32x128 for 64-token encoding (16x reduction vs SD).</li>
+            </ul>
+        </section>
+
+        <!-- Technical Notes -->
+        <section id="technical" class="blog-prose">
+            <h2>Technical Notes</h2>
+
+            <h3>Architecture</h3>
+            <p>
+                ViTok uses a Vision Transformer encoder and a hybrid ConvNet-Transformer decoder.
+                The decoder is the key to quality: it uses 5B parameters with sliding window attention
+                to process high-resolution images efficiently.
+            </p>
+
+            <h3>High-Resolution Inference</h3>
+            <p>
+                Unlike convolutional VAEs that run out of memory at high resolution, ViTok scales to
+                8K+ images using sliding window attention (SWA). At 8192px, ViTok uses 24GB VRAM while
+                Flux VAE fails with OOM.
+            </p>
+
+            <h3>Limitations</h3>
+            <ul>
+                <li>Decoder inference is slower than f8 VAEs due to model size (acceptable since it only runs once per generated image)</li>
+                <li>Training the 5B decoder requires significant compute (8xA100 for several days)</li>
+                <li>Best suited for scenarios where training cost dominates (large-scale diffusion training)</li>
+            </ul>
+        </section>
+    </main>
+
+    <footer>
+        <p>
+            ViTok v2 by <a href="https://github.com/philippe-eecs">Philippe Hansen-Estruch</a> |
+            <a href="https://github.com/Na-VAE/vitok-release">GitHub</a> |
+            <a href="https://huggingface.co/collections/philippehansen/vitok-v2-6789">HuggingFace</a>
+        </p>
+    </footer>
+</body>
+</html>
