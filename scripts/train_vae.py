@@ -27,12 +27,6 @@ from vitok.pp import sample_tiles
 from vitok import utils as tu
 from vitok.metrics import MetricCalculator
 
-import modal
-from scripts.modal.modal_config import image, gpu
-
-# Perceptual losses (imported lazily in train() to avoid issues on Modal import)
-import wandb
-
 
 def main():
     parser = argparse.ArgumentParser(description="Train ViTok VAE")
@@ -96,7 +90,6 @@ def main():
 
     # System
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--compile", action="store_true", default=True)
     parser.add_argument("--no_compile", action="store_true", help="Disable torch.compile")
 
     args = parser.parse_args()
@@ -115,8 +108,7 @@ def train(args):
     if args.freeze_encoder and not args.pretrained:
         raise ValueError("--freeze_encoder requires --pretrained to be specified.")
 
-    # Handle compile flag (--compile is default True, --no_compile disables it)
-    use_compile = args.compile and not args.no_compile
+    use_compile = not args.no_compile
 
     # Setup distributed
     rank, world_size, local_rank, device, device_mesh = tu.setup_distributed(args.seed)
@@ -137,9 +129,12 @@ def train(args):
     if rank == 0:
         output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Initialize wandb
+    # Initialize wandb (lazy import)
+    wandb = None
     wandb_enabled = args.wandb_project and rank == 0
     if wandb_enabled:
+        import wandb as _wandb
+        wandb = _wandb
         wandb.init(project=args.wandb_project, name=args.wandb_name, config=vars(args))
 
     # Create model
@@ -374,9 +369,6 @@ def train(args):
 
         # Backward
         loss.backward()
-        #grad_norm = tu.clip_grad_norm_(grad_params, args.grad_clip, use_fsdp=use_fsdp, world_size=world_size)
-        #grad_norm = 0
-
         optimizer.step()
         step += 1
         train_state['step'] = step
@@ -394,7 +386,6 @@ def train(args):
             elapsed = time.perf_counter() - t_log_start
             avg = {k: (v / log_count).item() for k, v in log_metrics.items()}
             avg['training/lr'] = lr
-            #avg['training/grad_norm'] = float(grad_norm) if isinstance(grad_norm, torch.Tensor) else grad_norm
             avg['timing/samples_per_sec'] = (args.batch_size * log_count * world_size) / elapsed
             avg['timing/step_time'] = elapsed / log_count
 
@@ -416,13 +407,13 @@ def train(args):
                 tokens_per_step = args.batch_size * args.max_tokens * world_size
                 flops_per_step = 6 * n_params * tokens_per_step
                 flops_per_sec = flops_per_step / (elapsed / log_count)
-                gpu_tflops = 912e12 * world_size
-                mfu = flops_per_sec / gpu_tflops * 100
-                avg['timing/mfu_percent'] = mfu
+                # MFU based on H100 SXM bf16 peak (989 TFLOPS)
+                gpu_tflops = 989e12 * world_size
+                avg['timing/mfu_percent'] = flops_per_sec / gpu_tflops * 100
 
             if rank == 0:
                 mem_str = f" | mem: {mem_allocated:.1f}GB" if torch.cuda.is_available() else ""
-                mfu_str = f" | H200 MFU: {avg.get('timing/mfu_percent', 0):.1f}%" if 'timing/mfu_percent' in avg else ""
+                mfu_str = f" | MFU: {avg.get('timing/mfu_percent', 0):.1f}%" if 'timing/mfu_percent' in avg else ""
                 data_str = f" | data: {avg.get('timing/data_load_ms', 0):.1f}ms ({avg.get('timing/data_throughput', 0):.0f} imgs/s)" if 'timing/data_load_ms' in avg else ""
                 print(f"Step {step}/{args.steps} | "
                       f"loss: {avg['loss/total']:.4f} | "
@@ -518,81 +509,86 @@ def train(args):
 # =============================================================================
 # Modal support: modal run scripts/train_vae.py --steps 100000
 # =============================================================================
-app = modal.App("vitok-train")
+try:
+    import modal
+    from scripts.modal.modal_config import image, gpu
 
+    app = modal.App("vitok-train")
 
-@app.function(image=image, **gpu("A100:8", timeout=86400))
-def run_training_remote(
-    data: str = "hf://timm/imagenet-22k-wds/imagenet22k-train-{0000..1023}.tar",
-    variant: str = "Ld2-Ld22/1x16x64",
-    batch_size: int = 32,
-    steps: int = 100000,
-    lr: float = 3e-4,
-    pretrained: str = None,
-    freeze_encoder: bool = False,
-    wandb_project: str = None,
-    wandb_name: str = None,
-    output_dir: str = "/output/checkpoints",
-):
-    """Run distributed training on Modal (8x A100 with FSDP)."""
-    import subprocess
-    import sys
+    @app.function(image=image, **gpu("A100:8", timeout=86400))
+    def run_training_remote(
+        data: str = "hf://timm/imagenet-22k-wds/imagenet22k-train-{0000..1023}.tar",
+        variant: str = "Ld2-Ld22/1x16x64",
+        batch_size: int = 32,
+        steps: int = 100000,
+        lr: float = 3e-4,
+        pretrained: str = None,
+        freeze_encoder: bool = False,
+        wandb_project: str = None,
+        wandb_name: str = None,
+        output_dir: str = "/output/checkpoints",
+    ):
+        """Run distributed training on Modal (8x A100 with FSDP)."""
+        import subprocess
+        import sys
 
-    cmd = [
-        sys.executable, "-m", "torch.distributed.run",
-        "--nproc_per_node=8", "scripts/train_vae.py", "--fsdp",
-        "--data", data,
-        "--variant", variant,
-        "--batch-size", str(batch_size),
-        "--steps", str(steps),
-        "--lr", str(lr),
-        "--output-dir", output_dir,
-    ]
+        cmd = [
+            sys.executable, "-m", "torch.distributed.run",
+            "--nproc_per_node=8", "scripts/train_vae.py", "--fsdp",
+            "--data", data,
+            "--variant", variant,
+            "--batch-size", str(batch_size),
+            "--steps", str(steps),
+            "--lr", str(lr),
+            "--output-dir", output_dir,
+        ]
 
-    if pretrained:
-        cmd.extend(["--pretrained", pretrained])
-    if freeze_encoder:
-        cmd.append("--freeze-encoder")
-    if wandb_project:
-        cmd.extend(["--wandb-project", wandb_project])
-    if wandb_name:
-        cmd.extend(["--wandb-name", wandb_name])
+        if pretrained:
+            cmd.extend(["--pretrained", pretrained])
+        if freeze_encoder:
+            cmd.append("--freeze-encoder")
+        if wandb_project:
+            cmd.extend(["--wandb-project", wandb_project])
+        if wandb_name:
+            cmd.extend(["--wandb-name", wandb_name])
 
-    print(f"Running: {' '.join(cmd)}")
-    subprocess.run(cmd, check=True)
+        print(f"Running: {' '.join(cmd)}")
+        subprocess.run(cmd, check=True)
 
+    @app.local_entrypoint()
+    def modal_main(
+        data: str = "hf://timm/imagenet-22k-wds/imagenet22k-train-{0000..1023}.tar",
+        variant: str = "Ld2-Ld22/1x16x64",
+        batch_size: int = 32,
+        steps: int = 100000,
+        lr: float = 3e-4,
+        pretrained: str = None,
+        freeze_encoder: bool = False,
+        wandb_project: str = None,
+        wandb_name: str = None,
+    ):
+        """Modal entrypoint for VAE training. See README.md for examples."""
+        print(f"Starting training on Modal (8x A100)...")
+        print(f"  Data: {data}")
+        print(f"  Variant: {variant}")
+        print(f"  Steps: {steps}")
 
-@app.local_entrypoint()
-def modal_main(
-    data: str = "hf://timm/imagenet-22k-wds/imagenet22k-train-{0000..1023}.tar",
-    variant: str = "Ld2-Ld22/1x16x64",
-    batch_size: int = 32,
-    steps: int = 100000,
-    lr: float = 3e-4,
-    pretrained: str = None,
-    freeze_encoder: bool = False,
-    wandb_project: str = None,
-    wandb_name: str = None,
-):
-    """Modal entrypoint for VAE training. See README.md for examples."""
-    print(f"Starting training on Modal (8x A100)...")
-    print(f"  Data: {data}")
-    print(f"  Variant: {variant}")
-    print(f"  Steps: {steps}")
+        run_training_remote.remote(
+            data=data,
+            variant=variant,
+            batch_size=batch_size,
+            steps=steps,
+            lr=lr,
+            pretrained=pretrained,
+            freeze_encoder=freeze_encoder,
+            wandb_project=wandb_project,
+            wandb_name=wandb_name,
+        )
 
-    run_training_remote.remote(
-        data=data,
-        variant=variant,
-        batch_size=batch_size,
-        steps=steps,
-        lr=lr,
-        pretrained=pretrained,
-        freeze_encoder=freeze_encoder,
-        wandb_project=wandb_project,
-        wandb_name=wandb_name,
-    )
+        print("Training complete! Checkpoints saved to Modal volume: vitok-output:/checkpoints")
 
-    print("Training complete! Checkpoints saved to Modal volume: vitok-output:/checkpoints")
+except ImportError:
+    pass  # Modal not installed, skip cloud training support
 
 
 if __name__ == "__main__":
