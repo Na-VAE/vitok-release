@@ -20,6 +20,13 @@ import numpy as np
 # Add project to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+# Detect available attention backend
+try:
+    from flash_attn import flash_attn_func
+    DEFAULT_ATTN_BACKEND = "flash"
+except ImportError:
+    DEFAULT_ATTN_BACKEND = "sdpa"
+
 
 def check_vitokv2_available():
     """Check if vitokv2 is available for comparison."""
@@ -156,8 +163,8 @@ def test_ae_encode_decode():
     """Test that AE can encode and decode without errors."""
     from vitok import AE, decode_variant
 
-    # Create small model
-    model = AE(**decode_variant("Bd2-Bd4/1x16x32"))
+    # Create small model with appropriate backend for CPU/GPU
+    model = AE(**decode_variant("Bd2-Bd4/1x16x32"), attn_backend=DEFAULT_ATTN_BACKEND)
     model.eval()
 
     # Create test input
@@ -198,7 +205,7 @@ def test_ae_reconstruction():
     """Test that AE can reconstruct input approximately."""
     from vitok import AE, decode_variant
 
-    model = AE(**decode_variant("Bd2-Bd4/1x16x32"))
+    model = AE(**decode_variant("Bd2-Bd4/1x16x32"), attn_backend=DEFAULT_ATTN_BACKEND)
     model.eval()
 
     # Create test input

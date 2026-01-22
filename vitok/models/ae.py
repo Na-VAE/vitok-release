@@ -2,7 +2,7 @@
 
 import torch
 import torch.nn as nn
-from typing import Optional, Tuple, Dict, List, Any
+from typing import Literal, Optional, Tuple, Dict, List, Any
 from torch.utils.checkpoint import checkpoint as _checkpoint
 
 from vitok.models.modules.mlp import SwiGLU
@@ -42,11 +42,12 @@ class Block(nn.Module):
         layer_scale_init: float = 1e-6,
         drop_path: float = 0.0,
         sliding_window: Optional[int] = None,
+        attn_backend: Literal["flash", "sdpa"] = "flash",
     ) -> None:
         super().__init__()
         self.sliding_window = sliding_window
         self.norm1 = RMSNorm(dim)
-        self.attn = Attention(dim=dim, num_heads=num_heads)
+        self.attn = Attention(dim=dim, num_heads=num_heads, backend=attn_backend)
         self.ffn = SwiGLU(dim, hidden_dim=ffn_dim)
         self.layer_scale = LayerScale(dim, layer_scale_init) if use_layer_scale else nn.Identity()
         self.drop_path_rate = drop_path
@@ -55,9 +56,10 @@ class Block(nn.Module):
         self,
         x: torch.Tensor,
         freqs_cis: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        attn_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         h = self.norm1(x)
-        attn_out = self.attn(h, freqs_cis=freqs_cis, sliding_window=self.sliding_window)
+        attn_out = self.attn(h, freqs_cis=freqs_cis, sliding_window=self.sliding_window, attn_mask=attn_mask)
         mlp_out = self.ffn(h)
         combined = self.layer_scale(attn_out + mlp_out)
         return x + drop_path(combined, self.drop_path_rate, self.training)
@@ -86,6 +88,7 @@ class AE(nn.Module):
         encoder: bool = True,
         decoder: bool = True,
         sw: Optional[int] = None,
+        attn_backend: Literal["flash", "sdpa"] = "flash",
         **kwargs,
     ):
         super().__init__()
@@ -109,6 +112,7 @@ class AE(nn.Module):
         self.is_encoder = encoder
         self.is_decoder = decoder
         self.sw = sw
+        self.attn_backend = attn_backend
         self._quantization_applied = False
 
         # Encoder
@@ -126,6 +130,7 @@ class AE(nn.Module):
                     layer_scale_init=layer_scale_init,
                     drop_path=0.0,
                     sliding_window=sw,
+                    attn_backend=attn_backend,
                 )
                 for _ in range(encoder_depth)
             ])
@@ -146,6 +151,7 @@ class AE(nn.Module):
                     layer_scale_init=layer_scale_init,
                     drop_path=decoder_dpr[i],
                     sliding_window=sw,
+                    attn_backend=attn_backend,
                 )
                 for i in range(decoder_depth)
             ])
@@ -164,6 +170,22 @@ class AE(nn.Module):
         freqs_cos, freqs_sin = compute_2d_freqs_cis(row, col, head_dim, self.rope_theta)
         return freqs_cos.float(), freqs_sin.float()
 
+    def _get_attn_mask(self, patch_mask: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
+        """Generate 2D attention mask from patch mask for SDPA backend.
+
+        Args:
+            patch_mask: [B, N] bool tensor where True = valid patch
+
+        Returns:
+            [B, 1, N, N] bool tensor for SDPA where True = attend, False = mask out
+        """
+        if patch_mask is None:
+            return None
+        # patch_mask: [B, N] -> mask_2d: [B, N, N]
+        # Position (i, j) is True if both patch i and patch j are valid
+        mask_2d = patch_mask.unsqueeze(2) & patch_mask.unsqueeze(1)  # [B, N, N]
+        return mask_2d.unsqueeze(1)  # [B, 1, N, N] for head broadcast
+
     def encode(self, patch_dict: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
         """Encode patches to latent codes."""
         x = self.patch_embed(patch_dict["patches"])
@@ -173,11 +195,14 @@ class AE(nn.Module):
             device=x.device,
         )
 
+        # Get attention mask for SDPA backend
+        attn_mask = self._get_attn_mask(patch_dict.get("patch_mask")) if self.attn_backend == "sdpa" else None
+
         for i, block in enumerate(self.encoder_blocks):
             if self._should_checkpoint(i):
-                x = _checkpoint(lambda _x: block(_x, freqs_cis=freqs_cis), x, use_reentrant=False)
+                x = _checkpoint(lambda _x: block(_x, freqs_cis=freqs_cis, attn_mask=attn_mask), x, use_reentrant=False)
             else:
-                x = block(x, freqs_cis=freqs_cis)
+                x = block(x, freqs_cis=freqs_cis, attn_mask=attn_mask)
 
         z = self.output_fn(self.to_code(x))
 
@@ -199,11 +224,14 @@ class AE(nn.Module):
             device=x.device,
         )
 
+        # Get attention mask for SDPA backend
+        attn_mask = self._get_attn_mask(encode_dict.get("patch_mask")) if self.attn_backend == "sdpa" else None
+
         for i, block in enumerate(self.decoder_blocks):
             if self._should_checkpoint(i):
-                x = _checkpoint(lambda _x: block(_x, freqs_cis=freqs_cis), x, use_reentrant=False)
+                x = _checkpoint(lambda _x: block(_x, freqs_cis=freqs_cis, attn_mask=attn_mask), x, use_reentrant=False)
             else:
-                x = block(x, freqs_cis=freqs_cis)
+                x = block(x, freqs_cis=freqs_cis, attn_mask=attn_mask)
 
         return {
             "patch_mask": encode_dict.get("patch_mask"),
